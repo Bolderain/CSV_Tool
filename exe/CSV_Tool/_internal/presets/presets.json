@@ -1,0 +1,43 @@
+{
+  "Repeater": {
+    "DEFAULT": {
+      "desiredConfigurationTemplate": "CFG-0001-0100-EBRO-20230223-FTPS-v1.tar.gz",
+      "desiredConfigurationMd5": "f09ffd00e02bf9ad2108ea5199d46d2c",
+      "desiredConfigurationSize": "195"
+    },
+    "test": {
+      "desiredConfigurationTemplate": "CFG-0001-0100-EBRO-20230223-FTPS-v1.tar.gz",
+      "desiredConfigurationMd5": "f09ffd00e02bf9ad2108ea5199d46d2c",
+      "desiredConfigurationSize": "195"
+    },
+    "Haßfurt": {
+      "desiredConfigurationTemplate": "CFG-R330.tar.gz",
+      "desiredConfigurationMd5": "b8687543230ea02c032c16c9ddcd4575",
+      "desiredConfigurationSize": "194"
+    }
+  },
+  "Headend": {
+    "DEFAULT": {
+      "desiredConfigurationTemplate": "CFG-0001-0100-HE-20230223-FTPS_AGC-v1.tar.gz",
+      "desiredConfigurationMd5": "648be952a640f0d00f5da9f12854477f",
+      "desiredConfigurationSize": "215"
+    },
+    "Haßfurt": {
+      "desiredConfigurationTemplate": "CFG-M300.tar.gz",
+      "desiredConfigurationMd5": "2a5378414357f87054f8ccc8897d6f3e",
+      "desiredConfigurationSize": "192"
+    }
+  },
+  "Proxie": {
+    "DEFAULT": {
+      "desiredConfigurationTemplate": "CFG-0001-0100-PROXY-20230131-FTPS-v1.tar.gz",
+      "desiredConfigurationMd5": "9768cbe43fa48cec894443e8c03ed399",
+      "desiredConfigurationSize": "630"
+    },
+    "Haßfurt": {
+      "desiredConfigurationTemplate": "CFG-P300.tar.gz",
+      "desiredConfigurationMd5": "af83fa8f4259eb60fc76f95f855f1182",
+      "desiredConfigurationSize": "627"
+    }
+  }
+}
