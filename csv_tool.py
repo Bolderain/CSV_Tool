@@ -1,15 +1,19 @@
 # csv_tool.py
 # PySide6 GUI version (replaces tkinter)
 # Features:
-# - Input: .csv (comma or semicolon) and .xlsx
+# - Input: .csv (comma or semicolon) and .xlsx (multi-sheet support)
 # - Output: always comma-separated CSV
 # - Modes: Repeater / Headend / Proxie
+# - Device type variants: R310/R320/R330, M300/M310/M320, P300/P310
+# - Config name validation: warns if template name suggests different device type
+# - Multi-sheet Excel: sheet selector in preview section
+# - No-header support: checkbox for sheets without header rows
 # - Presets stored in ./presets/presets.json (next to this script)
 # - Customer mappings stored in ./presets/mappings.json
 # - Auto preview on selection/add (first 5 rows), shows delimiter/sheet, headers, and detected mapping
 # - Manual mapping dropdowns + "Save mapping for customer"
 # - Skips empty rows and logs warnings (does not fail)
-# - Self-bootstraps dependencies (PySide6, openpyxl) into a private venv in %LOCALAPPDATA%\csv_tool\.venv
+# - Self-bootstraps dependencies (PySide6, openpyxl) into a private venv in C:\ct\.venv
 
 # -----------------------------
 # Dependency bootstrap
@@ -26,7 +30,6 @@ REQUIRED_PACKAGES = [
 ]
 
 
-
 def _run(cmd: list[str]) -> None:
     subprocess.check_call(cmd)
 
@@ -36,8 +39,6 @@ def _real(p: Path) -> Path:
 
 
 def _venv_dir() -> Path:
-    # very short path to avoid MAX_PATH with PySide6 files
-    # avoid Windows Store redirected LocalCache paths
     root = os.environ.get("SystemDrive", "C:")
     return _real(Path(root + r"\ct") / ".venv")
 
@@ -61,7 +62,6 @@ def _ensure_deps():
     py = _venv_python(venv_path)
     cfg = venv_path / "pyvenv.cfg"
 
-    # Recreate broken venv
     if not py.exists() or not cfg.exists():
         if venv_path.exists():
             shutil.rmtree(venv_path, ignore_errors=True)
@@ -112,6 +112,7 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QScrollArea,
     QSizePolicy,
+    QCheckBox,
 )
 
 
@@ -149,10 +150,11 @@ PROXIE_OUTPUT_FIELDS = [
     "desiredConfigurationSize",
 ]
 
-MODE_FIXED = {
-    "Repeater": {"type": "R310", "registrationStatus": "ACTIVATED"},
-    "Headend": {"type": "M300", "registrationStatus": "ACTIVATED"},
-    "Proxie": {"type": "P300", "registrationStatus": "ACTIVATED"},
+# Device type variants per mode
+DEVICE_VARIANTS = {
+    "Repeater": ["R310", "R320", "R330"],
+    "Headend": ["M300", "M310", "M320"],
+    "Proxie": ["P300", "P310"],
 }
 
 ACCESS_TOKEN_PREFIX = "00185803"
@@ -306,6 +308,13 @@ def _mac_minus_one(mac: str) -> str:
     return ":".join(h[i : i + 2] for i in range(0, 12, 2))
 
 
+def _normalize_mac_colonsep(mac: str) -> str:
+    raw = re.sub(r"[^0-9a-fA-F]", "", (mac or "").strip())
+    if len(raw) != 12:
+        raise ValueError(f"Invalid MAC (expected 12 hex digits): '{mac}'")
+    return ":".join(raw[i : i + 2].upper() for i in range(0, 12, 2))
+
+
 def _normalize_mac_12hex_lower(mac: str) -> str:
     raw = re.sub(r"[^0-9a-fA-F]", "", (mac or "").strip())
     if len(raw) != 12:
@@ -317,9 +326,59 @@ def _access_token_from_mac(mac: str) -> str:
     return ACCESS_TOKEN_PREFIX + _normalize_mac_12hex_lower(mac)
 
 
-def _build_run_cfg(mode: str, template: str, md5: str, size: str) -> dict:
-    if mode not in MODE_FIXED:
+def _excel_col_letter(idx: int) -> str:
+    """Convert 0-based column index to Excel column letter(s): 0→A, 25→Z, 26→AA …"""
+    result = ""
+    n = idx + 1
+    while n > 0:
+        n, r = divmod(n - 1, 26)
+        result = chr(ord("A") + r) + result
+    return result
+
+
+def _get_xlsx_sheet_names(path: Path) -> list[str]:
+    wb = load_workbook(path, read_only=True, data_only=True)
+    names = list(wb.sheetnames)
+    wb.close()
+    return names
+
+
+def _check_config_compatibility(template: str, mode: str, device_type: str) -> str | None:
+    """Return a warning string if template name suggests a different device type, else None."""
+    if not template:
+        return None
+    t = template.upper()
+
+    # Specific device type strings — checked in order; first match wins
+    specific = [
+        ("R310", "Repeater"), ("R320", "Repeater"), ("R330", "Repeater"),
+        ("M300", "Headend"), ("M310", "Headend"), ("M320", "Headend"),
+        ("P300", "Proxie"), ("P310", "Proxie"),
+    ]
+    for dtype, expected_mode in specific:
+        if dtype in t:
+            if expected_mode != mode:
+                return f"Config name contains '{dtype}' ({expected_mode}) — current mode is {mode}."
+            if dtype != device_type:
+                return f"Config name contains '{dtype}' — selected device type is {device_type}."
+            return None  # exact match, all good
+
+    # Mode-family keywords
+    if re.search(r"(?<![A-Z])HE(?![A-Z])|HEADEND", t) and mode != "Headend":
+        return f"Config name suggests Headend (HE/HEADEND) — current mode is {mode}."
+    if re.search(r"PROXY|PROX(?![A-Z])", t) and mode != "Proxie":
+        return f"Config name suggests Proxie (PROXY) — current mode is {mode}."
+    if re.search(r"EBRO", t) and mode != "Repeater":
+        return f"Config name suggests Repeater (EBRO) — current mode is {mode}."
+
+    return None
+
+
+def _build_run_cfg(mode: str, device_type: str, template: str, md5: str, size: str) -> dict:
+    if mode not in DEVICE_VARIANTS:
         raise ValueError(f"Unknown mode: {mode}")
+    if device_type not in DEVICE_VARIANTS[mode]:
+        raise ValueError(f"Invalid device type '{device_type}' for mode {mode}. Valid: {DEVICE_VARIANTS[mode]}")
 
     template = (template or "").strip()
     md5 = (md5 or "").strip()
@@ -337,33 +396,72 @@ def _build_run_cfg(mode: str, template: str, md5: str, size: str) -> dict:
         raise ValueError("desiredConfigurationSize must be numeric.")
 
     return {
-        "type": MODE_FIXED[mode]["type"],
-        "registrationStatus": MODE_FIXED[mode]["registrationStatus"],
+        "type": device_type,
+        "registrationStatus": "ACTIVATED",
         "desiredConfigurationTemplate": template,
         "desiredConfigurationMd5": md5.lower(),
         "desiredConfigurationSize": size,
     }
 
 
-def _read_xlsx_headers_and_rows(path: Path, max_rows: int | None = None):
+# -----------------------------
+# XLSX reading helpers
+# -----------------------------
+def _build_xlsx_fieldnames(raw_header: tuple, no_header: bool) -> list[str]:
+    """
+    Build column name list from a raw header row.
+    If no_header=True every column gets a positional name.
+    If no_header=False empty cells get a positional fallback (Col_A, Col_B …).
+    """
+    if no_header:
+        return [f"Col_{_excel_col_letter(i)}" for i in range(len(raw_header))]
+    result = []
+    for i, h in enumerate(raw_header):
+        name = str(h).strip() if h is not None else ""
+        if not name:
+            name = f"Col_{_excel_col_letter(i)}"
+        result.append(name)
+    return result
+
+
+def _read_xlsx_headers_and_rows(
+    path: Path,
+    sheet_name: str | None = None,
+    no_header: bool = False,
+    max_rows: int | None = None,
+):
     wb = load_workbook(path, read_only=True, data_only=True)
     try:
-        ws = wb.active
+        if sheet_name and sheet_name in wb.sheetnames:
+            ws = wb[sheet_name]
+        else:
+            ws = wb.active
+
         it = ws.iter_rows(values_only=True)
-        header = next(it, None)
-        if header is None:
-            raise ValueError(f"No header found in file: {path}")
-        fieldnames = [str(h).strip() if h is not None else "" for h in header]
-        if all(h == "" for h in fieldnames):
-            raise ValueError(f"Header row is empty in file: {path}")
+        first = next(it, None)
+        if first is None:
+            raise ValueError(f"No data in sheet '{ws.title}' in file: {path}")
+
+        fieldnames = _build_xlsx_fieldnames(first, no_header)
+        num_cols = len(fieldnames)
 
         rows = []
-        for excel_row_num, values in enumerate(it, start=2):
-            row = {}
-            for i, key in enumerate(fieldnames):
-                v = values[i] if i < len(values) else None
-                row[key] = "" if v is None else str(v).strip()
-            rows.append((excel_row_num, row))
+        start_row = 1 if no_header else 2
+
+        if no_header:
+            # first row is a data row
+            row0 = {
+                fieldnames[i]: ("" if i >= len(first) or first[i] is None else str(first[i]).strip())
+                for i in range(num_cols)
+            }
+            rows.append((1, row0))
+
+        for excel_row_num, values in enumerate(it, start=start_row + (0 if no_header else 0)):
+            row = {
+                fieldnames[i]: ("" if i >= len(values) or values[i] is None else str(values[i]).strip())
+                for i in range(num_cols)
+            }
+            rows.append((excel_row_num if no_header else excel_row_num, row))
             if max_rows is not None and len(rows) >= max_rows:
                 break
 
@@ -372,7 +470,12 @@ def _read_xlsx_headers_and_rows(path: Path, max_rows: int | None = None):
         wb.close()
 
 
-def _read_input_preview(infile: Path, max_rows: int = 5) -> dict:
+def _read_input_preview(
+    infile: Path,
+    sheet_name: str | None = None,
+    no_header: bool = False,
+    max_rows: int = 5,
+) -> dict:
     suffix = infile.suffix.lower()
 
     if suffix == ".csv":
@@ -387,16 +490,38 @@ def _read_input_preview(infile: Path, max_rows: int = 5) -> dict:
                 rows.append((row_index, row))
                 if len(rows) >= max_rows:
                     break
-            return {"type": "csv", "delimiter": delim, "sheet": "", "headers": headers, "rows": rows}
+            return {
+                "type": "csv",
+                "delimiter": delim,
+                "sheet": "",
+                "headers": headers,
+                "rows": rows,
+                "all_sheets": [],
+            }
 
     if suffix == ".xlsx":
-        sheet, headers, rows = _read_xlsx_headers_and_rows(infile, max_rows=max_rows)
-        return {"type": "xlsx", "delimiter": "", "sheet": sheet, "headers": headers, "rows": rows}
+        all_sheets = _get_xlsx_sheet_names(infile)
+        sheet, headers, rows = _read_xlsx_headers_and_rows(
+            infile, sheet_name=sheet_name, no_header=no_header, max_rows=max_rows
+        )
+        return {
+            "type": "xlsx",
+            "delimiter": "",
+            "sheet": sheet,
+            "headers": headers,
+            "rows": rows,
+            "all_sheets": all_sheets,
+        }
 
     raise ValueError(f"Unsupported input type: {infile.suffix}")
 
 
-def _iter_input_rows(infile: Path, log_fn):
+def _iter_input_rows(
+    infile: Path,
+    log_fn,
+    sheet_name: str | None = None,
+    no_header: bool = False,
+):
     suffix = infile.suffix.lower()
 
     if suffix == ".csv":
@@ -414,21 +539,39 @@ def _iter_input_rows(infile: Path, log_fn):
     if suffix == ".xlsx":
         wb = load_workbook(infile, read_only=True, data_only=True)
         try:
-            ws = wb.active
+            if sheet_name and sheet_name in wb.sheetnames:
+                ws = wb[sheet_name]
+            else:
+                ws = wb.active
+
             log_fn(f"Detected input type: xlsx (sheet '{ws.title}') for {infile.name}")
             it = ws.iter_rows(values_only=True)
-            header = next(it, None)
-            if header is None:
-                raise ValueError(f"No header found in file: {infile}")
-            fieldnames = [str(h).strip() if h is not None else "" for h in header]
-            if all(h == "" for h in fieldnames):
-                raise ValueError(f"Header row is empty in file: {infile}")
+            first = next(it, None)
+            if first is None:
+                raise ValueError(f"No data in sheet '{ws.title}' in file: {infile}")
+
+            fieldnames = _build_xlsx_fieldnames(first, no_header)
+            num_cols = len(fieldnames)
+
+            if not no_header and all(fn.startswith("Col_") for fn in fieldnames):
+                log_fn(
+                    f"WARNING: All column headers are empty in sheet '{ws.title}'. "
+                    "Consider enabling 'No header row' if the sheet has no header."
+                )
+
+            if no_header:
+                # first row IS a data row
+                row0 = {
+                    fieldnames[i]: ("" if i >= len(first) or first[i] is None else str(first[i]).strip())
+                    for i in range(num_cols)
+                }
+                yield 1, fieldnames, row0
 
             for excel_row_num, values in enumerate(it, start=2):
-                row = {}
-                for i, key in enumerate(fieldnames):
-                    v = values[i] if i < len(values) else None
-                    row[key] = "" if v is None else str(v).strip()
+                row = {
+                    fieldnames[i]: ("" if i >= len(values) or values[i] is None else str(values[i]).strip())
+                    for i in range(num_cols)
+                }
                 yield excel_row_num, fieldnames, row
         finally:
             wb.close()
@@ -517,7 +660,9 @@ def _save_mappings(mappings: dict) -> None:
 # -----------------------------
 # Transform factories with mapping override
 # -----------------------------
-def _resolve_serial_mac_keys(input_fieldnames: list[str], mapping_override: dict | None) -> tuple[str | None, str | None, str]:
+def _resolve_serial_mac_keys(
+    input_fieldnames: list[str], mapping_override: dict | None
+) -> tuple[str | None, str | None, str]:
     if mapping_override:
         s = (mapping_override.get("serial") or "").strip()
         m = (mapping_override.get("mac") or "").strip()
@@ -527,13 +672,12 @@ def _resolve_serial_mac_keys(input_fieldnames: list[str], mapping_override: dict
     serial_key = _pick_column(input_fieldnames, SERIAL_HEADER_ALIASES, must_contain=["serial"])
     mac_key = _pick_column(input_fieldnames, MAC_HEADER_ALIASES, must_contain=["mac"])
 
-    if serial_key and mac_key:
-        return serial_key, mac_key, "auto"
-
     return serial_key, mac_key, "auto"
 
 
-def _repeater_transform_factory(input_fieldnames: list[str], run_cfg: dict, mapping_override: dict | None):
+def _repeater_transform_factory(
+    input_fieldnames: list[str], run_cfg: dict, mapping_override: dict | None
+):
     serial_key, mac_key, _src = _resolve_serial_mac_keys(input_fieldnames, mapping_override)
     if not serial_key or not mac_key:
         raise ValueError(
@@ -545,10 +689,13 @@ def _repeater_transform_factory(input_fieldnames: list[str], run_cfg: dict, mapp
         serial = (row.get(serial_key) or "").strip()
         mac = (row.get(mac_key) or "").strip()
         if not serial:
-            raise ValueError(f"Repeater mode: empty serialNumber at row {row_index} (column: '{serial_key}')")
+            raise ValueError(
+                f"Repeater mode: empty serialNumber at row {row_index} (column: '{serial_key}')"
+            )
         if not mac:
-            raise ValueError(f"Repeater mode: empty macAddress at row {row_index} (column: '{mac_key}')")
-
+            raise ValueError(
+                f"Repeater mode: empty macAddress at row {row_index} (column: '{mac_key}')"
+            )
         return {
             "serialNumber": serial,
             "macAddress": mac,
@@ -562,7 +709,9 @@ def _repeater_transform_factory(input_fieldnames: list[str], run_cfg: dict, mapp
     return transform
 
 
-def _headend_transform_factory(input_fieldnames: list[str], run_cfg: dict, mapping_override: dict | None):
+def _headend_transform_factory(
+    input_fieldnames: list[str], run_cfg: dict, mapping_override: dict | None
+):
     serial_key, mac_key, _src = _resolve_serial_mac_keys(input_fieldnames, mapping_override)
     if not serial_key or not mac_key:
         raise ValueError(
@@ -574,13 +723,15 @@ def _headend_transform_factory(input_fieldnames: list[str], run_cfg: dict, mappi
         in_serial = (row.get(serial_key) or "").strip()
         in_mac = (row.get(mac_key) or "").strip()
         if not in_serial:
-            raise ValueError(f"Headend mode: empty serialNumber at row {row_index} (column: '{serial_key}')")
+            raise ValueError(
+                f"Headend mode: empty serialNumber at row {row_index} (column: '{serial_key}')"
+            )
         if not in_mac:
-            raise ValueError(f"Headend mode: empty macAddress at row {row_index} (column: '{mac_key}')")
-
+            raise ValueError(
+                f"Headend mode: empty macAddress at row {row_index} (column: '{mac_key}')"
+            )
         out_serial = _serial_c_to_b(in_serial)
         out_mac = _mac_minus_one(in_mac)
-
         return {
             "serialNumber": out_serial,
             "macAddress": out_mac,
@@ -594,7 +745,9 @@ def _headend_transform_factory(input_fieldnames: list[str], run_cfg: dict, mappi
     return transform
 
 
-def _proxie_transform_factory(input_fieldnames: list[str], run_cfg: dict, mapping_override: dict | None):
+def _proxie_transform_factory(
+    input_fieldnames: list[str], run_cfg: dict, mapping_override: dict | None
+):
     serial_key, mac_key, _src = _resolve_serial_mac_keys(input_fieldnames, mapping_override)
     if not serial_key or not mac_key:
         raise ValueError(
@@ -606,15 +759,18 @@ def _proxie_transform_factory(input_fieldnames: list[str], run_cfg: dict, mappin
         serial = (row.get(serial_key) or "").strip()
         mac_in = (row.get(mac_key) or "").strip()
         if not serial:
-            raise ValueError(f"Proxie mode: empty serialNumber at row {row_index} (column: '{serial_key}')")
+            raise ValueError(
+                f"Proxie mode: empty serialNumber at row {row_index} (column: '{serial_key}')"
+            )
         if not mac_in:
-            raise ValueError(f"Proxie mode: empty macAddress at row {row_index} (column: '{mac_key}')")
-
+            raise ValueError(
+                f"Proxie mode: empty macAddress at row {row_index} (column: '{mac_key}')"
+            )
+        normalized_mac = _normalize_mac_colonsep(mac_in)
         token = _access_token_from_mac(mac_in)
-
         return {
             "serialNumber": serial,
-            "macAddress": mac_in.strip(),
+            "macAddress": normalized_mac,
             "type": run_cfg["type"],
             "registrationStatus": run_cfg["registrationStatus"],
             "accessToken": token,
@@ -633,11 +789,8 @@ class CsvToolWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("CSV Tool")
-
-        # Start size: shows all features without resizing (still scrollable if user shrinks)
-        self.resize(1120, 880)
-        self.setMinimumSize(980, 780)
-
+        self.resize(1160, 960)
+        self.setMinimumSize(1000, 820)
 
         self.script_dir = _script_dir()
         self.output_dir = self.script_dir
@@ -656,12 +809,15 @@ class CsvToolWindow(QMainWindow):
             "Headend": self._default_preset_name("Headend"),
             "Proxie": self._default_preset_name("Proxie"),
         }
+        self._per_mode_device_type = {
+            mode: variants[0] for mode, variants in DEVICE_VARIANTS.items()
+        }
+        self._xlsx_sheets: list[str] = []
 
         self._build_ui()
         self._log(f"Presets file: {_presets_json_path()}")
         self._log(f"Mappings file: {_mappings_json_path()}")
 
-        # apply defaults
         self._set_mode_edit("Repeater")
 
     def _default_preset_name(self, mode: str) -> str:
@@ -680,7 +836,6 @@ class CsvToolWindow(QMainWindow):
         root_layout.setSpacing(10)
         root_layout.setContentsMargins(10, 10, 10, 10)
 
-        # Scroll container (lets the whole form scroll if window is smaller)
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         container = QWidget()
@@ -692,22 +847,24 @@ class CsvToolWindow(QMainWindow):
         root_layout.addWidget(scroll)
         self.setCentralWidget(central)
 
-        # -----------------------------
+        # -------------------------
         # Input files group
-        # -----------------------------
+        # -------------------------
         gb_files = QGroupBox("Input files (.csv or .xlsx)")
         files_layout = QGridLayout(gb_files)
         files_layout.setColumnStretch(0, 1)
 
         self.file_list = QListWidget()
         self.file_list.setToolTip("Input files list. Selecting a file auto-previews it.")
-        self.file_list.setFixedHeight(90)  # small, no huge empty area
+        self.file_list.setFixedHeight(90)
         self.file_list.currentRowChanged.connect(self._on_file_selected)
 
         files_layout.addWidget(self.file_list, 0, 0, 4, 1)
 
         btn_add = QPushButton("Add files")
-        btn_add.setToolTip("Add one or more input files (.csv or .xlsx). Newly added file is auto-selected and previewed.")
+        btn_add.setToolTip(
+            "Add one or more input files (.csv or .xlsx). Newly added file is auto-selected and previewed."
+        )
         btn_add.clicked.connect(self._add_files)
 
         btn_remove = QPushButton("Remove selected")
@@ -719,7 +876,9 @@ class CsvToolWindow(QMainWindow):
         btn_clear.clicked.connect(self._clear_list)
 
         btn_preview = QPushButton("Preview selected")
-        btn_preview.setToolTip("Show the first 5 rows, detected delimiter/sheet, headers, and mapping.")
+        btn_preview.setToolTip(
+            "Show the first 5 rows, detected delimiter/sheet, headers, and mapping."
+        )
         btn_preview.clicked.connect(self._preview_selected)
 
         files_layout.addWidget(btn_add, 0, 1)
@@ -729,9 +888,9 @@ class CsvToolWindow(QMainWindow):
 
         self.form_layout.addWidget(gb_files)
 
-        # -----------------------------
+        # -------------------------
         # Output and filename group
-        # -----------------------------
+        # -------------------------
         gb_out = QGroupBox("Output")
         out_layout = QGridLayout(gb_out)
         out_layout.setColumnStretch(1, 1)
@@ -754,7 +913,9 @@ class CsvToolWindow(QMainWindow):
 
         out_layout.addWidget(QLabel("INPUTNAME_CUSTOMER"), 1, 1, alignment=Qt.AlignCenter)
         self.customer_edit = QLineEdit("")
-        self.customer_edit.setToolTip("Customer name used in output filename and customer mapping key.")
+        self.customer_edit.setToolTip(
+            "Customer name used in output filename and customer mapping key."
+        )
         self.customer_edit.setMaximumWidth(260)
         out_layout.addWidget(self.customer_edit, 1, 2, alignment=Qt.AlignLeft)
 
@@ -764,58 +925,86 @@ class CsvToolWindow(QMainWindow):
 
         self.form_layout.addWidget(gb_out)
 
-        # -----------------------------
+        # -------------------------
         # Desired configuration group
-        # -----------------------------
+        # -------------------------
         gb_cfg = QGroupBox("Desired configuration (presets + editable)")
         cfg_layout = QGridLayout(gb_cfg)
-        cfg_layout.setColumnStretch(5, 1)
+        cfg_layout.setColumnStretch(7, 1)
 
+        # Row 0: Edit for | combo | Device type | combo | Preset | combo | New preset name | field | Save
         cfg_layout.addWidget(QLabel("Edit for"), 0, 0)
-
         self.edit_for = QComboBox()
         self.edit_for.addItems(["Repeater", "Headend", "Proxie"])
-        self.edit_for.setToolTip("Select which device type you want to edit desired configuration for.")
+        self.edit_for.setToolTip(
+            "Select which device type you want to edit desired configuration for."
+        )
         self.edit_for.currentTextChanged.connect(self._set_mode_edit)
         cfg_layout.addWidget(self.edit_for, 0, 1)
 
-        cfg_layout.addWidget(QLabel("Preset"), 0, 2)
-        self.preset_combo = QComboBox()
-        self.preset_combo.setToolTip("Select a preset to fill Template/MD5/Size. Editing fields switches to Custom.")
-        self.preset_combo.currentTextChanged.connect(self._on_preset_changed)
-        cfg_layout.addWidget(self.preset_combo, 0, 3)
+        cfg_layout.addWidget(QLabel("Device type"), 0, 2)
+        self.device_type_combo = QComboBox()
+        self.device_type_combo.setToolTip(
+            "Select specific device type variant (e.g. R310, R320, R330 for Repeater).\n"
+            "This determines the 'type' field in the output CSV."
+        )
+        self.device_type_combo.currentTextChanged.connect(self._on_device_type_changed)
+        cfg_layout.addWidget(self.device_type_combo, 0, 3)
 
-        cfg_layout.addWidget(QLabel("New preset name"), 0, 4)
+        cfg_layout.addWidget(QLabel("Preset"), 0, 4)
+        self.preset_combo = QComboBox()
+        self.preset_combo.setToolTip(
+            "Select a preset to fill Template/MD5/Size. Editing fields switches to Custom."
+        )
+        self.preset_combo.currentTextChanged.connect(self._on_preset_changed)
+        cfg_layout.addWidget(self.preset_combo, 0, 5)
+
+        cfg_layout.addWidget(QLabel("New preset name"), 0, 6)
         self.new_preset_name = QLineEdit("")
-        self.new_preset_name.setToolTip("Name for a new preset. Must be unique within the selected mode.")
-        cfg_layout.addWidget(self.new_preset_name, 0, 5)
+        self.new_preset_name.setToolTip(
+            "Name for a new preset. Must be unique within the selected mode."
+        )
+        cfg_layout.addWidget(self.new_preset_name, 0, 7)
 
         btn_save_preset = QPushButton("Save preset")
-        btn_save_preset.setToolTip("Save the current Template/MD5/Size as a new preset for this mode.")
+        btn_save_preset.setToolTip(
+            "Save the current Template/MD5/Size as a new preset for this mode."
+        )
         btn_save_preset.clicked.connect(self._save_preset)
-        cfg_layout.addWidget(btn_save_preset, 0, 6)
+        cfg_layout.addWidget(btn_save_preset, 0, 8)
 
+        # Row 1: template
         cfg_layout.addWidget(QLabel("desiredConfigurationTemplate"), 1, 0)
         self.template_edit = QLineEdit("")
         self.template_edit.textChanged.connect(self._mark_custom_if_user_edit)
-        cfg_layout.addWidget(self.template_edit, 1, 1, 1, 6)
+        cfg_layout.addWidget(self.template_edit, 1, 1, 1, 8)
 
-        cfg_layout.addWidget(QLabel("desiredConfigurationMd5"), 2, 0)
+        # Row 2: config compatibility warning (empty = hidden visually via style)
+        self.config_warn_label = QLabel("")
+        self.config_warn_label.setStyleSheet(
+            "color: #cc6600; font-weight: bold; padding: 0px 0px 2px 0px;"
+        )
+        self.config_warn_label.setVisible(False)
+        cfg_layout.addWidget(self.config_warn_label, 2, 0, 1, 9)
+
+        # Row 3: md5
+        cfg_layout.addWidget(QLabel("desiredConfigurationMd5"), 3, 0)
         self.md5_edit = QLineEdit("")
         self.md5_edit.textChanged.connect(self._mark_custom_if_user_edit)
-        cfg_layout.addWidget(self.md5_edit, 2, 1, 1, 6)
+        cfg_layout.addWidget(self.md5_edit, 3, 1, 1, 8)
 
-        cfg_layout.addWidget(QLabel("desiredConfigurationSize"), 3, 0)
+        # Row 4: size
+        cfg_layout.addWidget(QLabel("desiredConfigurationSize"), 4, 0)
         self.size_edit = QLineEdit("")
         self.size_edit.setMaximumWidth(120)
         self.size_edit.textChanged.connect(self._mark_custom_if_user_edit)
-        cfg_layout.addWidget(self.size_edit, 3, 1, alignment=Qt.AlignLeft)
+        cfg_layout.addWidget(self.size_edit, 4, 1, alignment=Qt.AlignLeft)
 
         self.form_layout.addWidget(gb_cfg)
 
-        # -----------------------------
+        # -------------------------
         # Preview + mapping group
-        # -----------------------------
+        # -------------------------
         gb_preview = QGroupBox("Input preview (first 5 rows) and mapping")
         pv_layout = QVBoxLayout(gb_preview)
 
@@ -827,28 +1016,59 @@ class CsvToolWindow(QMainWindow):
         pv_layout.addWidget(self.preview_info)
         pv_layout.addWidget(self.mapping_info)
 
-        row = QHBoxLayout()
-        row.addWidget(QLabel("Serial column"))
+        # Sheet selector row (only shown for multi-sheet xlsx)
+        sheet_row = QHBoxLayout()
+        self.sheet_label = QLabel("Sheet:")
+        sheet_row.addWidget(self.sheet_label)
+        self.sheet_combo = QComboBox()
+        self.sheet_combo.setMinimumWidth(300)
+        self.sheet_combo.setToolTip(
+            "Select which sheet to preview and process. Only shown for multi-sheet Excel files."
+        )
+        self.sheet_combo.currentTextChanged.connect(self._on_sheet_changed)
+        sheet_row.addWidget(self.sheet_combo)
+
+        sheet_row.addSpacing(16)
+        self.no_header_cb = QCheckBox("No header row (first row is data)")
+        self.no_header_cb.setToolTip(
+            "Check this when the sheet has no header row.\n"
+            "Columns will be named Col_A, Col_B, etc.\n"
+            "Set Serial/MAC mapping manually and save for this customer."
+        )
+        self.no_header_cb.toggled.connect(self._on_no_header_changed)
+        sheet_row.addWidget(self.no_header_cb)
+        sheet_row.addStretch(1)
+
+        self.sheet_label.setVisible(False)
+        self.sheet_combo.setVisible(False)
+
+        pv_layout.addLayout(sheet_row)
+
+        # Mapping row
+        map_row = QHBoxLayout()
+        map_row.addWidget(QLabel("Serial column"))
         self.serial_combo = QComboBox()
         self.serial_combo.setToolTip("Select which input column contains the serial number.")
         self.serial_combo.setMinimumWidth(240)
-        row.addWidget(self.serial_combo)
+        map_row.addWidget(self.serial_combo)
 
-        row.addSpacing(10)
-        row.addWidget(QLabel("MAC column"))
+        map_row.addSpacing(10)
+        map_row.addWidget(QLabel("MAC column"))
         self.mac_combo = QComboBox()
         self.mac_combo.setToolTip("Select which input column contains the MAC address.")
         self.mac_combo.setMinimumWidth(240)
-        row.addWidget(self.mac_combo)
+        map_row.addWidget(self.mac_combo)
 
-        row.addSpacing(10)
+        map_row.addSpacing(10)
         btn_save_map = QPushButton("Save mapping for customer")
-        btn_save_map.setToolTip("Save selected Serial/MAC columns for the current customer (Filename input name).")
+        btn_save_map.setToolTip(
+            "Save selected Serial/MAC columns for the current customer (Filename input name)."
+        )
         btn_save_map.clicked.connect(self._save_mapping_for_customer)
-        row.addWidget(btn_save_map)
+        map_row.addWidget(btn_save_map)
+        map_row.addStretch(1)
 
-        row.addStretch(1)
-        pv_layout.addLayout(row)
+        pv_layout.addLayout(map_row)
 
         self.preview_text = QPlainTextEdit()
         self.preview_text.setReadOnly(True)
@@ -858,39 +1078,47 @@ class CsvToolWindow(QMainWindow):
 
         self.form_layout.addWidget(gb_preview)
 
-        # -----------------------------
+        # -------------------------
         # Scripts group
-        # -----------------------------
+        # -------------------------
         gb_scripts = QGroupBox("Scripts")
         sc_layout = QHBoxLayout(gb_scripts)
 
-        btn_rep = QPushButton("Repeater")
-        btn_rep.setToolTip("Generate output CSV for Repeaters (R310).")
-        btn_rep.clicked.connect(lambda: self._run_mode("Repeater"))
+        self.btn_rep = QPushButton("Repeater (R310)")
+        self.btn_rep.setToolTip(
+            "Generate output CSV for Repeaters. Uses the device type shown in the button label."
+        )
+        self.btn_rep.clicked.connect(lambda: self._run_mode("Repeater"))
 
-        btn_he = QPushButton("Headend")
-        btn_he.setToolTip("Generate output CSV for Headends (M300). Serial C->B, MAC minus 1.")
-        btn_he.clicked.connect(lambda: self._run_mode("Headend"))
+        self.btn_he = QPushButton("Headend (M300)")
+        self.btn_he.setToolTip(
+            "Generate output CSV for Headends. Serial C→B, MAC−1. "
+            "Uses the device type shown in the button label."
+        )
+        self.btn_he.clicked.connect(lambda: self._run_mode("Headend"))
 
-        btn_px = QPushButton("Proxie")
-        btn_px.setToolTip("Generate output CSV for Proxies (P300). Adds accessToken = 00185803 + MAC (no separators, lower-case).")
-        btn_px.clicked.connect(lambda: self._run_mode("Proxie"))
+        self.btn_px = QPushButton("Proxie (P300)")
+        self.btn_px.setToolTip(
+            "Generate output CSV for Proxies. Adds accessToken = 00185803 + MAC (no separators, lowercase). "
+            "MAC output formatted as XX:XX:XX:XX:XX:XX. Uses the device type shown in the button label."
+        )
+        self.btn_px.clicked.connect(lambda: self._run_mode("Proxie"))
 
         self.status = QLabel("Ready.")
         self.status.setStyleSheet("color: gray;")
 
-        sc_layout.addWidget(btn_rep)
-        sc_layout.addWidget(btn_he)
-        sc_layout.addWidget(btn_px)
+        sc_layout.addWidget(self.btn_rep)
+        sc_layout.addWidget(self.btn_he)
+        sc_layout.addWidget(self.btn_px)
         sc_layout.addSpacing(16)
         sc_layout.addWidget(self.status)
         sc_layout.addStretch(1)
 
         self.form_layout.addWidget(gb_scripts)
 
-        # -----------------------------
+        # -------------------------
         # Log group
-        # -----------------------------
+        # -------------------------
         gb_log = QGroupBox("Log")
         log_layout = QVBoxLayout(gb_log)
 
@@ -969,7 +1197,6 @@ class CsvToolWindow(QMainWindow):
                 self.file_list.addItem(QListWidgetItem(str(f)))
 
     def _on_file_selected(self, _row: int):
-        # auto preview on selection
         if not self._building:
             self._preview_selected()
 
@@ -987,6 +1214,12 @@ class CsvToolWindow(QMainWindow):
             self.serial_combo.clear()
         with QSignalBlocker(self.mac_combo):
             self.mac_combo.clear()
+        self._xlsx_sheets = []
+        self._set_sheet_selector_visible(False)
+
+    def _set_sheet_selector_visible(self, visible: bool):
+        self.sheet_label.setVisible(visible)
+        self.sheet_combo.setVisible(visible)
 
     # -----------------------------
     # Output folder
@@ -1000,11 +1233,39 @@ class CsvToolWindow(QMainWindow):
         self._log(f"Output folder set: {self.output_dir}")
 
     # -----------------------------
+    # Device type and config validation
+    # -----------------------------
+    def _on_device_type_changed(self, dtype: str):
+        if self._building or not dtype:
+            return
+        self._per_mode_device_type[self.mode_edit] = dtype
+        self._refresh_run_buttons()
+        self._update_config_warning()
+
+    def _refresh_run_buttons(self):
+        self.btn_rep.setText(f"Repeater ({self._per_mode_device_type['Repeater']})")
+        self.btn_he.setText(f"Headend ({self._per_mode_device_type['Headend']})")
+        self.btn_px.setText(f"Proxie ({self._per_mode_device_type['Proxie']})")
+
+    def _update_config_warning(self):
+        if self._building:
+            return
+        template = (self.template_edit.text() or "").strip()
+        mode = self.mode_edit
+        device_type = self._per_mode_device_type.get(mode, "")
+        warning = _check_config_compatibility(template, mode, device_type)
+        if warning:
+            self.config_warn_label.setText(f"⚠  {warning}")
+            self.config_warn_label.setVisible(True)
+        else:
+            self.config_warn_label.setText("")
+            self.config_warn_label.setVisible(False)
+
+    # -----------------------------
     # Desired config preset logic
     # -----------------------------
     def _set_mode_edit(self, mode: str):
         self.mode_edit = mode
-        # populate presets list for this mode
         self.presets = _load_presets()
         names = sorted(self.presets.get(mode, {}).keys())
         if "Custom" not in names:
@@ -1013,14 +1274,26 @@ class CsvToolWindow(QMainWindow):
         with QSignalBlocker(self.preset_combo):
             self.preset_combo.clear()
             self.preset_combo.addItems(names)
-
             selected = self._per_mode_selected_preset.get(mode, "DEFAULT")
             if selected not in names:
                 selected = "DEFAULT" if "DEFAULT" in names else (names[0] if names else "Custom")
             self.preset_combo.setCurrentText(selected)
 
-        # apply selected preset to fields
+        # Update device type combo for this mode
+        variants = DEVICE_VARIANTS.get(mode, [])
+        with QSignalBlocker(self.device_type_combo):
+            self.device_type_combo.clear()
+            self.device_type_combo.addItems(variants)
+            current_dtype = self._per_mode_device_type.get(mode, variants[0] if variants else "")
+            if current_dtype in variants:
+                self.device_type_combo.setCurrentText(current_dtype)
+            elif variants:
+                self.device_type_combo.setCurrentText(variants[0])
+                self._per_mode_device_type[mode] = variants[0]
+
         self._apply_preset(mode, self.preset_combo.currentText())
+        self._refresh_run_buttons()
+        self._update_config_warning()
 
     def _apply_preset(self, mode: str, preset_name: str):
         if preset_name == "Custom":
@@ -1033,13 +1306,17 @@ class CsvToolWindow(QMainWindow):
         self._applying_preset = True
         try:
             with QSignalBlocker(self.template_edit):
-                self.template_edit.setText(str(values.get("desiredConfigurationTemplate", "")).strip())
+                self.template_edit.setText(
+                    str(values.get("desiredConfigurationTemplate", "")).strip()
+                )
             with QSignalBlocker(self.md5_edit):
                 self.md5_edit.setText(str(values.get("desiredConfigurationMd5", "")).strip())
             with QSignalBlocker(self.size_edit):
                 self.size_edit.setText(str(values.get("desiredConfigurationSize", "")).strip())
         finally:
             self._applying_preset = False
+
+        self._update_config_warning()
 
     def _on_preset_changed(self, preset: str):
         if self._building:
@@ -1050,12 +1327,12 @@ class CsvToolWindow(QMainWindow):
     def _mark_custom_if_user_edit(self, _text: str):
         if self._building or self._applying_preset:
             return
-        # Switch current mode to Custom if user edits any config field
         if self.preset_combo.currentText() != "Custom":
             with QSignalBlocker(self.preset_combo):
                 if self.preset_combo.findText("Custom") >= 0:
                     self.preset_combo.setCurrentText("Custom")
             self._per_mode_selected_preset[self.mode_edit] = "Custom"
+        self._update_config_warning()
 
     def _save_preset(self):
         mode = self.mode_edit
@@ -1070,7 +1347,11 @@ class CsvToolWindow(QMainWindow):
 
         self.presets = _load_presets()
         if name in self.presets.get(mode, {}):
-            QMessageBox.critical(self, "Preset name", f"Preset name already exists for {mode}. Choose another name.")
+            QMessageBox.critical(
+                self,
+                "Preset name",
+                f"Preset name already exists for {mode}. Choose another name.",
+            )
             return
 
         template = (self.template_edit.text() or "").strip()
@@ -1081,10 +1362,14 @@ class CsvToolWindow(QMainWindow):
             QMessageBox.critical(self, "Preset values", "desiredConfigurationTemplate is empty.")
             return
         if not _validate_md5_hex32(md5):
-            QMessageBox.critical(self, "Preset values", "desiredConfigurationMd5 must be 32 hex characters.")
+            QMessageBox.critical(
+                self, "Preset values", "desiredConfigurationMd5 must be 32 hex characters."
+            )
             return
         if not _validate_size_numeric(size):
-            QMessageBox.critical(self, "Preset values", "desiredConfigurationSize must be numeric.")
+            QMessageBox.critical(
+                self, "Preset values", "desiredConfigurationSize must be numeric."
+            )
             return
 
         if mode not in self.presets:
@@ -1106,6 +1391,39 @@ class CsvToolWindow(QMainWindow):
         QMessageBox.information(self, "Preset saved", f"Saved preset '{name}' for {mode}.")
 
     # -----------------------------
+    # Sheet selector (xlsx multi-sheet)
+    # -----------------------------
+    def _on_sheet_changed(self, sheet_name: str):
+        if self._building or not sheet_name:
+            return
+        self._refresh_preview_for_current_file()
+
+    def _on_no_header_changed(self, _checked: bool):
+        if self._building:
+            return
+        self._refresh_preview_for_current_file()
+
+    def _selected_sheet(self) -> str | None:
+        if self.sheet_combo.isVisible():
+            t = self.sheet_combo.currentText()
+            return t if t else None
+        return None
+
+    def _refresh_preview_for_current_file(self):
+        """Re-run preview with current sheet/no_header settings, without resetting sheet combo."""
+        f = self._selected_file()
+        if not f:
+            return
+        no_header = self.no_header_cb.isChecked()
+        sheet_name = self._selected_sheet()
+        try:
+            info = _read_input_preview(f, sheet_name=sheet_name, no_header=no_header, max_rows=5)
+        except Exception as e:
+            self._log(f"Preview error: {e}")
+            return
+        self._render_preview(f, info, update_sheet_combo=False)
+
+    # -----------------------------
     # Preview + mapping
     # -----------------------------
     def _customer_key(self) -> str:
@@ -1118,7 +1436,10 @@ class CsvToolWindow(QMainWindow):
         self.mappings = _load_mappings()
         v = self.mappings.get(customer)
         if isinstance(v, dict):
-            return {"serial": str(v.get("serial", "")).strip(), "mac": str(v.get("mac", "")).strip()}
+            return {
+                "serial": str(v.get("serial", "")).strip(),
+                "mac": str(v.get("mac", "")).strip(),
+            }
         return None
 
     def _preview_selected(self):
@@ -1127,7 +1448,35 @@ class CsvToolWindow(QMainWindow):
             self._clear_preview()
             return
 
-        info = _read_input_preview(f, max_rows=5)
+        no_header = self.no_header_cb.isChecked()
+        # On initial preview, use whatever sheet is currently selected (or None = active sheet)
+        sheet_name = self._selected_sheet()
+
+        try:
+            info = _read_input_preview(f, sheet_name=sheet_name, no_header=no_header, max_rows=5)
+        except Exception as e:
+            self._log(f"Preview error for {f.name}: {e}")
+            self.preview_info.setText(f"Preview error: {e}")
+            return
+
+        # Update sheet combo if xlsx with multiple sheets
+        all_sheets = info.get("all_sheets", [])
+        if info["type"] == "xlsx" and len(all_sheets) > 1:
+            with QSignalBlocker(self.sheet_combo):
+                self.sheet_combo.clear()
+                self.sheet_combo.addItems(all_sheets)
+                active_sheet = info["sheet"]
+                if active_sheet in all_sheets:
+                    self.sheet_combo.setCurrentText(active_sheet)
+            self._xlsx_sheets = all_sheets
+            self._set_sheet_selector_visible(True)
+        else:
+            self._xlsx_sheets = []
+            self._set_sheet_selector_visible(False)
+
+        self._render_preview(f, info, update_sheet_combo=False)
+
+    def _render_preview(self, f: Path, info: dict, update_sheet_combo: bool = True):
         headers = info["headers"]
 
         with QSignalBlocker(self.serial_combo):
@@ -1161,35 +1510,36 @@ class CsvToolWindow(QMainWindow):
             with QSignalBlocker(self.mac_combo):
                 self.mac_combo.setCurrentText(mac_eff)
 
+        no_header = self.no_header_cb.isChecked()
         if info["type"] == "csv":
             self.preview_info.setText(
-                f"Preview: {f.name} (csv, delimiter '{info['delimiter']}'), headers: {len(headers)}"
+                f"Preview: {f.name} (csv, delimiter '{info['delimiter']}'), "
+                f"headers: {len(headers)}"
             )
         else:
+            header_note = " [no header — positional cols]" if no_header else ""
             self.preview_info.setText(
-                f"Preview: {f.name} (xlsx, sheet '{info['sheet']}'), headers: {len(headers)}"
+                f"Preview: {f.name} (xlsx, sheet '{info['sheet']}'{header_note}), "
+                f"headers: {len(headers)}"
             )
 
         if mapping_src == "auto":
-            self.mapping_info.setText(f"Mapping: auto (serial '{serial_eff}', mac '{mac_eff}')")
+            self.mapping_info.setText(
+                f"Mapping: auto (serial '{serial_eff}', mac '{mac_eff}')"
+            )
         elif mapping_src == "saved":
             self.mapping_info.setText(
-                f"Mapping: saved for customer '{self._customer_key()}' (serial '{serial_eff}', mac '{mac_eff}')"
+                f"Mapping: saved for customer '{self._customer_key()}' "
+                f"(serial '{serial_eff}', mac '{mac_eff}')"
             )
         else:
             self.mapping_info.setText("Mapping: not detected (select columns manually)")
 
-        # render preview text
         def trunc(v: str, n: int = 60) -> str:
             v = (v or "").strip()
             return v if len(v) <= n else v[: n - 3] + "..."
 
-        lines = []
-        lines.append("Headers:")
-        lines.append("  " + " | ".join(headers))
-        lines.append("")
-        lines.append("Rows (first 5):")
-
+        lines = ["Headers:", "  " + " | ".join(headers), "", "Rows (first 5):"]
         rows = info["rows"]
         if not rows:
             lines.append("  (no data rows)")
@@ -1211,17 +1561,25 @@ class CsvToolWindow(QMainWindow):
             QMessageBox.critical(self, "Customer mapping", "No file selected.")
             return
 
-        info = _read_input_preview(f, max_rows=1)
+        sheet_name = self._selected_sheet()
+        no_header = self.no_header_cb.isChecked()
+        info = _read_input_preview(f, sheet_name=sheet_name, no_header=no_header, max_rows=1)
         headers = info["headers"]
 
         serial_col = (self.serial_combo.currentText() or "").strip()
         mac_col = (self.mac_combo.currentText() or "").strip()
 
         if not serial_col or not mac_col:
-            QMessageBox.critical(self, "Customer mapping", "Select both Serial column and MAC column.")
+            QMessageBox.critical(
+                self, "Customer mapping", "Select both Serial column and MAC column."
+            )
             return
         if serial_col not in headers or mac_col not in headers:
-            QMessageBox.critical(self, "Customer mapping", "Selected columns are not in the current file headers.")
+            QMessageBox.critical(
+                self,
+                "Customer mapping",
+                "Selected columns are not in the current file headers.",
+            )
             return
 
         self.mappings = _load_mappings()
@@ -1238,8 +1596,13 @@ class CsvToolWindow(QMainWindow):
         self.mappings[customer] = {"serial": serial_col, "mac": mac_col}
         _save_mappings(self.mappings)
 
-        self.mapping_info.setText(f"Mapping: saved for customer '{customer}' (serial '{serial_col}', mac '{mac_col}')")
-        self._log(f"Saved mapping for customer '{customer}': serial='{serial_col}', mac='{mac_col}'")
+        self.mapping_info.setText(
+            f"Mapping: saved for customer '{customer}' "
+            f"(serial '{serial_col}', mac '{mac_col}')"
+        )
+        self._log(
+            f"Saved mapping for customer '{customer}': serial='{serial_col}', mac='{mac_col}'"
+        )
         QMessageBox.information(self, "Customer mapping", f"Saved mapping for '{customer}'.")
 
     # -----------------------------
@@ -1259,7 +1622,6 @@ class CsvToolWindow(QMainWindow):
         return date_str, customer
 
     def _mapping_override_for_run(self) -> dict | None:
-        # If user selected something in the dropdowns, prefer that (even if not saved yet)
         serial_col = (self.serial_combo.currentText() or "").strip()
         mac_col = (self.mac_combo.currentText() or "").strip()
         if serial_col and mac_col:
@@ -1274,17 +1636,38 @@ class CsvToolWindow(QMainWindow):
         try:
             date_str, customer = self._validate_common_inputs()
 
+            device_type = self._per_mode_device_type.get(mode, DEVICE_VARIANTS[mode][0])
+
             run_cfg = _build_run_cfg(
                 mode=mode,
+                device_type=device_type,
                 template=self.template_edit.text(),
                 md5=self.md5_edit.text(),
                 size=self.size_edit.text(),
             )
 
+            # Warn if config name doesn't match device type (non-blocking)
+            warning = _check_config_compatibility(
+                run_cfg["desiredConfigurationTemplate"], mode, device_type
+            )
+            if warning:
+                res = QMessageBox.question(
+                    self,
+                    "Config name mismatch",
+                    f"{warning}\n\nContinue anyway?",
+                    QMessageBox.Yes | QMessageBox.No,
+                )
+                if res != QMessageBox.Yes:
+                    self.status.setText("Cancelled.")
+                    return
+
             mapping_override = self._mapping_override_for_run()
 
-            self.status.setText(f"Running: {mode} ...")
-            self._log(f"Run started. Mode: {mode}")
+            sheet_name = self._selected_sheet()
+            no_header = self.no_header_cb.isChecked()
+
+            self.status.setText(f"Running: {mode} ({device_type}) ...")
+            self._log(f"Run started. Mode: {mode}, Device type: {device_type}")
 
             time_tag = dt.datetime.now().strftime("%H%M%S")
 
@@ -1292,9 +1675,12 @@ class CsvToolWindow(QMainWindow):
                 tmp_name = f"__tmp__{date_str}_{time_tag}_{i}.csv"
                 tmp_path = self.output_dir / tmp_name
 
-                data_rows = self._process_one_file(infile, tmp_path, mode, run_cfg, mapping_override)
+                data_rows = self._process_one_file(
+                    infile, tmp_path, mode, run_cfg, mapping_override,
+                    sheet_name=sheet_name, no_header=no_header,
+                )
 
-                final_name = _final_output_name(date_str, customer, data_rows, run_cfg["type"])
+                final_name = _final_output_name(date_str, customer, data_rows, device_type)
                 final_path = self.output_dir / final_name
 
                 if final_path.exists():
@@ -1305,16 +1691,25 @@ class CsvToolWindow(QMainWindow):
                 self._log(f"Saved: {final_path.name}")
 
             self.status.setText("Done.")
-            self._log(f"Run finished successfully. Mode: {mode}")
+            self._log(f"Run finished successfully. Mode: {mode}, Device type: {device_type}")
         except Exception as e:
             self.status.setText("Error.")
             self._log(f"ERROR: {e}")
             QMessageBox.critical(self, f"Error [{mode}]", str(e))
 
-    def _process_one_file(self, infile: Path, out_path: Path, mode: str, run_cfg: dict, mapping_override: dict | None) -> int:
+    def _process_one_file(
+        self,
+        infile: Path,
+        out_path: Path,
+        mode: str,
+        run_cfg: dict,
+        mapping_override: dict | None,
+        sheet_name: str | None = None,
+        no_header: bool = False,
+    ) -> int:
         self._log(f"Processing: {infile.name}")
 
-        it = _iter_input_rows(infile, self._log)
+        it = _iter_input_rows(infile, self._log, sheet_name=sheet_name, no_header=no_header)
         first = next(it, None)
         if first is None:
             raise ValueError(f"No data in file: {infile}")
@@ -1354,14 +1749,14 @@ class CsvToolWindow(QMainWindow):
             for row_index, _fields, row in it:
                 handle(row_index, row)
 
-        self._log(f"OK: {infile.name} data rows written: {data_rows} (skipped empty: {skipped_empty})")
+        self._log(
+            f"OK: {infile.name} data rows written: {data_rows} (skipped empty: {skipped_empty})"
+        )
         return data_rows
 
 
 def main():
     app = QApplication(sys.argv)
-    # Force light mode (ignore system dark theme)
-    # Force light mode via stylesheet (avoids QtGui imports)
     app.setStyle("Fusion")
     app.setStyleSheet("""
         QWidget { background: #f5f5f5; color: #000000; }
@@ -1381,8 +1776,8 @@ def main():
         QPushButton:hover { background: #e8e8e8; }
         QGroupBox { border: 1px solid #c8c8c8; margin-top: 8px; }
         QGroupBox::title { subcontrol-origin: margin; left: 8px; padding: 0 3px; }
+        QCheckBox { background: transparent; }
     """)
-
 
     w = CsvToolWindow()
     w.show()
