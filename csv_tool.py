@@ -377,8 +377,13 @@ def _check_config_compatibility(template: str, mode: str, device_type: str) -> s
 def _build_run_cfg(mode: str, device_type: str, template: str, md5: str, size: str) -> dict:
     if mode not in DEVICE_VARIANTS:
         raise ValueError(f"Unknown mode: {mode}")
-    if device_type not in DEVICE_VARIANTS[mode]:
-        raise ValueError(f"Invalid device type '{device_type}' for mode {mode}. Valid: {DEVICE_VARIANTS[mode]}")
+
+    device_type = (device_type or "").strip()
+    if not device_type:
+        raise ValueError(
+            f"Device type is empty. Pick a preset ({', '.join(DEVICE_VARIANTS[mode])}) "
+            "or type your own."
+        )
 
     template = (template or "").strip()
     md5 = (md5 or "").strip()
@@ -944,9 +949,12 @@ class CsvToolWindow(QMainWindow):
 
         cfg_layout.addWidget(QLabel("Device type"), 0, 2)
         self.device_type_combo = QComboBox()
+        self.device_type_combo.setEditable(True)
+        self.device_type_combo.setInsertPolicy(QComboBox.NoInsert)
+        self.device_type_combo.setMinimumWidth(110)
         self.device_type_combo.setToolTip(
-            "Select specific device type variant (e.g. R310, R320, R330 for Repeater).\n"
-            "This determines the 'type' field in the output CSV."
+            "Select a device type variant (e.g. R310, R320, R330 for Repeater),\n"
+            "or type your own value. This determines the 'type' field in the output CSV."
         )
         self.device_type_combo.currentTextChanged.connect(self._on_device_type_changed)
         cfg_layout.addWidget(self.device_type_combo, 0, 3)
@@ -1236,7 +1244,10 @@ class CsvToolWindow(QMainWindow):
     # Device type and config validation
     # -----------------------------
     def _on_device_type_changed(self, dtype: str):
-        if self._building or not dtype:
+        if self._building:
+            return
+        dtype = (dtype or "").strip()
+        if not dtype:
             return
         self._per_mode_device_type[self.mode_edit] = dtype
         self._refresh_run_buttons()
@@ -1279,17 +1290,14 @@ class CsvToolWindow(QMainWindow):
                 selected = "DEFAULT" if "DEFAULT" in names else (names[0] if names else "Custom")
             self.preset_combo.setCurrentText(selected)
 
-        # Update device type combo for this mode
+        # Update device type combo for this mode (editable: keeps custom values too)
         variants = DEVICE_VARIANTS.get(mode, [])
         with QSignalBlocker(self.device_type_combo):
             self.device_type_combo.clear()
             self.device_type_combo.addItems(variants)
-            current_dtype = self._per_mode_device_type.get(mode, variants[0] if variants else "")
-            if current_dtype in variants:
-                self.device_type_combo.setCurrentText(current_dtype)
-            elif variants:
-                self.device_type_combo.setCurrentText(variants[0])
-                self._per_mode_device_type[mode] = variants[0]
+            current_dtype = self._per_mode_device_type.get(mode, "") or (variants[0] if variants else "")
+            self.device_type_combo.setCurrentText(current_dtype)
+            self._per_mode_device_type[mode] = current_dtype
 
         self._apply_preset(mode, self.preset_combo.currentText())
         self._refresh_run_buttons()
