@@ -150,12 +150,15 @@ PROXIE_OUTPUT_FIELDS = [
     "desiredConfigurationSize",
 ]
 
-# Device type variants per mode
+# Device type variants per mode (editable combo — user can also type any custom value)
 DEVICE_VARIANTS = {
     "Repeater": ["R310", "R320", "R330"],
-    "Headend": ["M300", "M310", "M320"],
-    "Proxie": ["P300", "P310"],
+    "Headend":  ["M200", "M300", "M310", "M320", "M400", "M500"],
+    "Proxie":   ["P200", "P300", "P310", "P400", "P500"],
 }
+
+# Maps the leading letter of a device-type token (e.g. M400) to its mode
+_DEVICE_LETTER_MODE = {"R": "Repeater", "M": "Headend", "P": "Proxie"}
 
 ACCESS_TOKEN_PREFIX = "00185803"
 
@@ -344,32 +347,32 @@ def _get_xlsx_sheet_names(path: Path) -> list[str]:
 
 
 def _check_config_compatibility(name: str, mode: str, device_type: str, label: str = "Config") -> str | None:
-    """Return a warning+suggestion string if name suggests a different device type/mode, else None."""
+    """Return a warning+suggestion string if name suggests a different device type/mode, else None.
+
+    Detects any token [R|M|P]NNN (letter + exactly 3 digits) — future-proof for M400, P500 etc.
+    """
     if not name:
         return None
     t = name.upper()
 
-    # Specific device type strings — checked in order; first match wins
-    specific = [
-        ("R310", "Repeater"), ("R320", "Repeater"), ("R330", "Repeater"),
-        ("M300", "Headend"), ("M310", "Headend"), ("M320", "Headend"),
-        ("P300", "Proxie"), ("P310", "Proxie"),
-    ]
-    for dtype, expected_mode in specific:
-        if dtype in t:
-            if expected_mode != mode:
-                return (
-                    f"{label} contains '{dtype}' ({expected_mode}) but mode is {mode}. "
-                    f"→ Switch to {expected_mode} mode."
-                )
-            if dtype != device_type:
-                return (
-                    f"{label} contains '{dtype}' but device type is set to {device_type}. "
-                    f"→ Change device type to {dtype}."
-                )
-            return None  # exact match, all good
+    # Match any [R/M/P] followed by exactly 3 digits, not part of a longer alphanumeric token
+    m = re.search(r"(?<![A-Z0-9])([RMP])(\d{3})(?![A-Z0-9])", t)
+    if m:
+        found_dtype = m.group(0)  # e.g. "M400"
+        expected_mode = _DEVICE_LETTER_MODE[m.group(1)]
+        if expected_mode != mode:
+            return (
+                f"{label} contains '{found_dtype}' ({expected_mode}) but mode is {mode}. "
+                f"→ Switch to {expected_mode} mode."
+            )
+        if found_dtype != device_type.upper():
+            return (
+                f"{label} contains '{found_dtype}' but device type is set to {device_type}. "
+                f"→ Change device type to {found_dtype}."
+            )
+        return None  # exact match, all good
 
-    # Mode-family keywords
+    # Mode-family keyword fallback (for names without a numeric device token)
     if re.search(r"(?<![A-Z])HE(?![A-Z])|HEADEND", t) and mode != "Headend":
         return (
             f"{label} suggests Headend (HE/HEADEND) but mode is {mode}. "
