@@ -288,6 +288,93 @@ def _is_empty_row(row: dict) -> bool:
     return all(((v or "").strip() == "") for v in row.values())
 
 
+def _scan_all_rows(
+    infile: Path,
+    serial_col: str | None,
+    sheet_name: str | None = None,
+    no_header: bool = False,
+) -> tuple[int, int, list[str]]:
+    """Scan the whole file. Return (data_rows, empty_rows, dup_warning_msgs)."""
+    total = 0
+    empty = 0
+    seen: dict[str, int] = {}
+    dups: list[str] = []
+
+    def _noop(_msg): pass
+
+    for row_index, _fields, row in _iter_input_rows(infile, _noop, sheet_name=sheet_name, no_header=no_header):
+        if _is_empty_row(row):
+            empty += 1
+            continue
+        total += 1
+        if serial_col:
+            sn = (row.get(serial_col) or "").strip()
+            if sn:
+                if sn in seen:
+                    if len(dups) < 20:
+                        dups.append(f"Row {row_index}: '{sn}' (also row {seen[sn]})")
+                else:
+                    seen[sn] = row_index
+    return total, empty, dups
+
+
+def _validate_export(
+    infile: Path,
+    mode: str,
+    run_cfg: dict,
+    mapping_override: dict | None,
+    sheet_name: str | None,
+    no_header: bool,
+    log_fn,
+) -> dict:
+    """Full row-by-row validation pass. Returns {ok_count, errors, skipped_empty, total_data}."""
+    it = _iter_input_rows(infile, log_fn, sheet_name=sheet_name, no_header=no_header)
+    first = next(it, None)
+    if first is None:
+        return {"ok_count": 0, "errors": [], "skipped_empty": 0, "total_data": 0}
+
+    first_row_index, input_fields, first_row = first
+    factory, _ = _FACTORY_BY_MODE[mode]
+
+    try:
+        transform = factory(input_fields, run_cfg, mapping_override)
+    except ValueError as e:
+        return {"ok_count": 0, "errors": [(0, str(e))], "skipped_empty": 0, "total_data": 0}
+
+    ok_count = 0
+    errors: list[tuple[int, str]] = []
+    skipped_empty = 0
+    seen_serials: dict[str, int] = {}
+
+    def _process(row_index: int, row: dict):
+        nonlocal ok_count, skipped_empty
+        if _is_empty_row(row):
+            skipped_empty += 1
+            return
+        try:
+            result = transform(row, row_index)
+            sn = result.get("serialNumber", "")
+            if sn and sn in seen_serials:
+                errors.append((row_index, f"Duplicate serialNumber '{sn}' (also at row {seen_serials[sn]})"))
+            else:
+                if sn:
+                    seen_serials[sn] = row_index
+                ok_count += 1
+        except ValueError as e:
+            errors.append((row_index, str(e)))
+
+    _process(first_row_index, first_row)
+    for row_index, _fields, row in it:
+        _process(row_index, row)
+
+    return {
+        "ok_count": ok_count,
+        "errors": errors,
+        "skipped_empty": skipped_empty,
+        "total_data": ok_count + len(errors),
+    }
+
+
 def _serial_c_to_b(serial: str) -> str:
     s = (serial or "").strip()
     if not s:

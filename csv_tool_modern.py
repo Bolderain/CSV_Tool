@@ -97,6 +97,7 @@ from PySide6.QtCore import Qt, QSignalBlocker
 from PySide6.QtGui import QColor, QFont
 from PySide6.QtWidgets import (
     QApplication,
+    QDialog,
     QMainWindow,
     QWidget,
     QGroupBox,
@@ -297,6 +298,93 @@ def _detect_input_delimiter(file_obj) -> str:
 
 def _is_empty_row(row: dict) -> bool:
     return all(((v or "").strip() == "") for v in row.values())
+
+
+def _scan_all_rows(
+    infile: Path,
+    serial_col: str | None,
+    sheet_name: str | None = None,
+    no_header: bool = False,
+) -> tuple[int, int, list[str]]:
+    """Scan the whole file. Return (data_rows, empty_rows, dup_warning_msgs)."""
+    total = 0
+    empty = 0
+    seen: dict[str, int] = {}
+    dups: list[str] = []
+
+    def _noop(_msg): pass
+
+    for row_index, _fields, row in _iter_input_rows(infile, _noop, sheet_name=sheet_name, no_header=no_header):
+        if _is_empty_row(row):
+            empty += 1
+            continue
+        total += 1
+        if serial_col:
+            sn = (row.get(serial_col) or "").strip()
+            if sn:
+                if sn in seen:
+                    if len(dups) < 20:
+                        dups.append(f"Row {row_index}: '{sn}' (also row {seen[sn]})")
+                else:
+                    seen[sn] = row_index
+    return total, empty, dups
+
+
+def _validate_export(
+    infile: Path,
+    mode: str,
+    run_cfg: dict,
+    mapping_override: dict | None,
+    sheet_name: str | None,
+    no_header: bool,
+    log_fn,
+) -> dict:
+    """Full row-by-row validation pass. Returns {ok_count, errors, skipped_empty, total_data}."""
+    it = _iter_input_rows(infile, log_fn, sheet_name=sheet_name, no_header=no_header)
+    first = next(it, None)
+    if first is None:
+        return {"ok_count": 0, "errors": [], "skipped_empty": 0, "total_data": 0}
+
+    first_row_index, input_fields, first_row = first
+    factory, _ = _FACTORY_BY_MODE[mode]
+
+    try:
+        transform = factory(input_fields, run_cfg, mapping_override)
+    except ValueError as e:
+        return {"ok_count": 0, "errors": [(0, str(e))], "skipped_empty": 0, "total_data": 0}
+
+    ok_count = 0
+    errors: list[tuple[int, str]] = []
+    skipped_empty = 0
+    seen_serials: dict[str, int] = {}
+
+    def _process(row_index: int, row: dict):
+        nonlocal ok_count, skipped_empty
+        if _is_empty_row(row):
+            skipped_empty += 1
+            return
+        try:
+            result = transform(row, row_index)
+            sn = result.get("serialNumber", "")
+            if sn and sn in seen_serials:
+                errors.append((row_index, f"Duplicate serialNumber '{sn}' (also at row {seen_serials[sn]})"))
+            else:
+                if sn:
+                    seen_serials[sn] = row_index
+                ok_count += 1
+        except ValueError as e:
+            errors.append((row_index, str(e)))
+
+    _process(first_row_index, first_row)
+    for row_index, _fields, row in it:
+        _process(row_index, row)
+
+    return {
+        "ok_count": ok_count,
+        "errors": errors,
+        "skipped_empty": skipped_empty,
+        "total_data": ok_count + len(errors),
+    }
 
 
 def _serial_c_to_b(serial: str) -> str:
@@ -828,6 +916,91 @@ COL_ERR_BG = QColor("#fde7e9")     # light red
 
 
 # -----------------------------
+# Validation summary dialog (Feature 1)
+# -----------------------------
+class ValidationSummaryDialog(QDialog):
+    EXPORT_VALID = 1
+    EXPORT_ALL = 2
+    CANCEL = 0
+
+    def __init__(self, parent, filename: str, ok_count: int, errors: list, skipped_empty: int):
+        super().__init__(parent)
+        self.setWindowTitle("Export — Validation summary")
+        self.result_choice = self.CANCEL
+        self.setMinimumWidth(700)
+        self.setModal(True)
+
+        lay = QVBoxLayout(self)
+        lay.setSpacing(10)
+        lay.setContentsMargins(18, 18, 18, 18)
+
+        lay.addWidget(QLabel(f"<b>{filename}</b>"))
+
+        ok_lbl = QLabel(f"✓  {ok_count} row{'s' if ok_count != 1 else ''} ready for export")
+        ok_lbl.setStyleSheet(f"color: {OK_GREEN}; font-weight: bold;")
+        lay.addWidget(ok_lbl)
+
+        if skipped_empty:
+            s_lbl = QLabel(
+                f"○  {skipped_empty} empty row{'s' if skipped_empty != 1 else ''} will be skipped automatically"
+            )
+            s_lbl.setStyleSheet("color: #5b6068;")
+            lay.addWidget(s_lbl)
+
+        if errors:
+            err_lbl = QLabel(f"⚠  {len(errors)} row{'s' if len(errors) != 1 else ''} with problems:")
+            err_lbl.setStyleSheet(f"color: {WARN_ORANGE}; font-weight: bold;")
+            lay.addWidget(err_lbl)
+
+            tbl = QTableWidget()
+            tbl.setEditTriggers(QAbstractItemView.NoEditTriggers)
+            tbl.setSelectionMode(QAbstractItemView.NoSelection)
+            tbl.verticalHeader().setVisible(False)
+            tbl.setColumnCount(2)
+            tbl.setHorizontalHeaderLabels(["Row", "Problem"])
+            tbl.horizontalHeader().setStretchLastSection(True)
+            tbl.setRowCount(len(errors))
+            for i, (row_idx, msg) in enumerate(errors):
+                tbl.setItem(i, 0, QTableWidgetItem(str(row_idx) if row_idx else "—"))
+                item = QTableWidgetItem(msg)
+                item.setForeground(QColor(ERR_RED))
+                item.setBackground(COL_ERR_BG)
+                tbl.setItem(i, 1, item)
+            tbl.resizeColumnToContents(0)
+            tbl.setMinimumHeight(180)
+            lay.addWidget(tbl)
+
+        btn_row = QHBoxLayout()
+
+        if ok_count > 0:
+            lbl = (
+                f"✓  Export {ok_count} valid row{'s' if ok_count != 1 else ''}"
+                if errors
+                else f"✓  Export {ok_count} row{'s' if ok_count != 1 else ''}"
+            )
+            btn_ok = QPushButton(lbl)
+            btn_ok.setObjectName("primary")
+            btn_ok.clicked.connect(lambda: self._pick(self.EXPORT_VALID))
+            btn_row.addWidget(btn_ok)
+
+        if errors:
+            total = ok_count + len(errors)
+            btn_all = QPushButton(f"Export all {total} rows (include problem rows)")
+            btn_all.clicked.connect(lambda: self._pick(self.EXPORT_ALL))
+            btn_row.addWidget(btn_all)
+
+        btn_cancel = QPushButton("Cancel")
+        btn_cancel.clicked.connect(self.reject)
+        btn_row.addWidget(btn_cancel)
+        btn_row.addStretch(1)
+        lay.addLayout(btn_row)
+
+    def _pick(self, choice: int):
+        self.result_choice = choice
+        self.accept()
+
+
+# -----------------------------
 # Drag & drop file list
 # -----------------------------
 class FileDropList(QListWidget):
@@ -884,6 +1057,8 @@ class CsvToolModernWindow(QMainWindow):
         self._sheet_selector_active = False
         self._cur_headers: list[str] = []
         self._cur_rows: list = []
+        self._serial_src: str = "none"
+        self._mac_src: str = "none"
 
         self._build_ui()
         self._log(f"Presets file: {_presets_json_path()}")
@@ -1166,6 +1341,12 @@ class CsvToolModernWindow(QMainWindow):
         map_row.addStretch(1)
         lay.addLayout(map_row)
 
+        self.mapping_warn_label = QLabel("")
+        self.mapping_warn_label.setObjectName("warn")
+        self.mapping_warn_label.setWordWrap(True)
+        self.mapping_warn_label.setVisible(False)
+        lay.addWidget(self.mapping_warn_label)
+
         # Tabs: input + output preview
         self.preview_tabs = QTabWidget()
         self.input_table = self._make_table()
@@ -1178,6 +1359,17 @@ class CsvToolModernWindow(QMainWindow):
         self.preview_info = QLabel("No file selected.")
         self.preview_info.setObjectName("muted")
         lay.addWidget(self.preview_info)
+
+        self.row_count_label = QLabel("")
+        self.row_count_label.setObjectName("muted")
+        self.row_count_label.setVisible(False)
+        lay.addWidget(self.row_count_label)
+
+        self.dup_warn_label = QLabel("")
+        self.dup_warn_label.setObjectName("warn")
+        self.dup_warn_label.setWordWrap(True)
+        self.dup_warn_label.setVisible(False)
+        lay.addWidget(self.dup_warn_label)
 
         return box
 
@@ -1336,12 +1528,14 @@ class CsvToolModernWindow(QMainWindow):
             self.serial_combo.clear()
         with QSignalBlocker(self.mac_combo):
             self.mac_combo.clear()
-        self._set_badge(self.serial_badge, "none")
-        self._set_badge(self.mac_badge, "none")
         self._cur_headers = []
         self._cur_rows = []
+        self._set_badge(self.serial_badge, "none")
+        self._set_badge(self.mac_badge, "none")
         self._xlsx_sheets = []
         self._set_sheet_selector_visible(False)
+        self.row_count_label.setVisible(False)
+        self.dup_warn_label.setVisible(False)
 
     def _set_sheet_selector_visible(self, visible: bool):
         self._sheet_selector_active = visible
@@ -1671,6 +1865,7 @@ class CsvToolModernWindow(QMainWindow):
 
         self._fill_input_table(headers, rows)
         self._refresh_output_preview()
+        self._update_row_count_and_dups()
 
     def _current_serial_mac(self) -> tuple[str, str]:
         return (self.serial_combo.currentText() or "").strip(), (self.mac_combo.currentText() or "").strip()
@@ -1768,6 +1963,11 @@ class CsvToolModernWindow(QMainWindow):
         t.resizeColumnsToContents()
 
     def _set_badge(self, label: QLabel, src: str):
+        if label is self.serial_badge:
+            self._serial_src = src
+        elif label is self.mac_badge:
+            self._mac_src = src
+
         if src == "auto":
             label.setText("✓ auto")
             label.setStyleSheet(f"color: {OK_GREEN}; font-weight: bold;")
@@ -1785,6 +1985,67 @@ class CsvToolModernWindow(QMainWindow):
             label.setStyleSheet(f"color: {WARN_ORANGE}; font-weight: bold;")
             label.setToolTip("Not detected — please pick the column manually.")
 
+        self._update_mapping_warning()
+
+    def _update_mapping_warning(self):
+        if not hasattr(self, "mapping_warn_label"):
+            return
+        warn_style = f"border: 2px solid {WARN_ORANGE}; border-radius: 5px;"
+        self.serial_combo.setStyleSheet(warn_style if self._serial_src == "none" else "")
+        self.mac_combo.setStyleSheet(warn_style if self._mac_src == "none" else "")
+
+        missing = []
+        if self._serial_src == "none":
+            missing.append("Serial")
+        if self._mac_src == "none":
+            missing.append("MAC")
+
+        if missing and self._cur_headers:
+            self.mapping_warn_label.setText(
+                "⚠  " + " and ".join(missing)
+                + " column not auto-detected — verify the column selection above before exporting."
+            )
+            self.mapping_warn_label.setVisible(True)
+        else:
+            self.mapping_warn_label.setText("")
+            self.mapping_warn_label.setVisible(False)
+
+    def _update_row_count_and_dups(self):
+        if not hasattr(self, "row_count_label"):
+            return
+        f = self._selected_file()
+        if not f:
+            self.row_count_label.setVisible(False)
+            self.dup_warn_label.setVisible(False)
+            return
+        serial_col, _ = self._current_serial_mac()
+        sheet_name = self._selected_sheet()
+        no_header = self.no_header_cb.isChecked()
+        try:
+            total, empty, dups = _scan_all_rows(f, serial_col, sheet_name, no_header)
+        except Exception:
+            self.row_count_label.setVisible(False)
+            self.dup_warn_label.setVisible(False)
+            return
+
+        parts = [f"📊  {total} data row{'s' if total != 1 else ''}"]
+        if empty:
+            parts.append(f"{empty} empty skipped")
+        self.row_count_label.setText("  ·  ".join(parts))
+        self.row_count_label.setVisible(True)
+
+        if dups:
+            shown = dups[:5]
+            extra = len(dups) - 5
+            text = "⚠  Duplicate serial numbers:  " + "  |  ".join(shown)
+            if extra > 0:
+                text += f"  (+{extra} more)"
+            self.dup_warn_label.setText(text)
+            self.dup_warn_label.setVisible(True)
+        else:
+            self.dup_warn_label.setText("")
+            self.dup_warn_label.setVisible(False)
+
     def _on_mapping_combo_changed(self, _text: str):
         if self._building:
             return
@@ -1797,6 +2058,7 @@ class CsvToolModernWindow(QMainWindow):
         if self._cur_headers:
             self._fill_input_table(self._cur_headers, self._cur_rows)
         self._refresh_output_preview()
+        self._update_row_count_and_dups()
 
     def _save_mapping_for_customer(self):
         customer = self._customer_key()
@@ -1893,6 +2155,35 @@ class CsvToolModernWindow(QMainWindow):
             sheet_name = self._selected_sheet()
             no_header = self.no_header_cb.isChecked()
 
+            # --- Validation phase ---
+            self.status.setText("Validating …")
+            all_validations = []
+            for infile in self.files:
+                v = _validate_export(infile, mode, run_cfg, mapping_override, sheet_name, no_header, self._log)
+                all_validations.append((infile, v))
+
+            total_ok = sum(v["ok_count"] for _, v in all_validations)
+            total_errors = sum(len(v["errors"]) for _, v in all_validations)
+            total_skipped = sum(v["skipped_empty"] for _, v in all_validations)
+            skip_errors = False
+
+            if total_errors > 0:
+                combined_errors = []
+                for infile, v in all_validations:
+                    for row_idx, msg in v["errors"]:
+                        label = f"[{infile.name}] {msg}" if len(self.files) > 1 else msg
+                        combined_errors.append((row_idx, label))
+
+                fname = self.files[0].name if len(self.files) == 1 else f"{len(self.files)} files"
+                dlg = ValidationSummaryDialog(self, fname, total_ok, combined_errors, total_skipped)
+                dlg.exec()
+
+                if dlg.result_choice == ValidationSummaryDialog.CANCEL:
+                    self.status.setText("Cancelled.")
+                    return
+                skip_errors = (dlg.result_choice == ValidationSummaryDialog.EXPORT_VALID)
+
+            # --- Export phase ---
             self.status.setText(f"Running: {mode} ({device_type}) …")
             self._log(f"Export started. Mode: {mode}, Device type: {device_type}")
             time_tag = dt.datetime.now().strftime("%H%M%S")
@@ -1900,9 +2191,9 @@ class CsvToolModernWindow(QMainWindow):
             for i, infile in enumerate(self.files, start=1):
                 tmp_name = f"__tmp__{date_str}_{time_tag}_{i}.csv"
                 tmp_path = self.output_dir / tmp_name
-                data_rows = self._process_one_file(
+                data_rows, error_rows = self._process_one_file(
                     infile, tmp_path, mode, run_cfg, mapping_override,
-                    sheet_name=sheet_name, no_header=no_header,
+                    sheet_name=sheet_name, no_header=no_header, skip_errors=skip_errors,
                 )
                 final_name = _final_output_name(date_str, customer, data_rows, device_type)
                 final_path = self.output_dir / final_name
@@ -1910,7 +2201,13 @@ class CsvToolModernWindow(QMainWindow):
                     tmp_path.unlink(missing_ok=True)
                     raise FileExistsError(f"Output already exists: {final_path}")
                 tmp_path.replace(final_path)
-                self._log(f"Saved: {final_path.name}")
+                if error_rows:
+                    self._log(
+                        f"Saved: {final_path.name}  "
+                        f"({error_rows} row{'s' if error_rows != 1 else ''} skipped due to errors)"
+                    )
+                else:
+                    self._log(f"Saved: {final_path.name}")
 
             self.status.setText("Done. ✓")
             self.status.setStyleSheet(f"color: {OK_GREEN}; font-weight: bold;")
@@ -1924,7 +2221,8 @@ class CsvToolModernWindow(QMainWindow):
     def _process_one_file(
         self, infile: Path, out_path: Path, mode: str, run_cfg: dict,
         mapping_override: dict | None, sheet_name: str | None = None, no_header: bool = False,
-    ) -> int:
+        skip_errors: bool = False,
+    ) -> tuple[int, int]:
         self._log(f"Processing: {infile.name}")
         it = _iter_input_rows(infile, self._log, sheet_name=sheet_name, no_header=no_header)
         first = next(it, None)
@@ -1940,22 +2238,30 @@ class CsvToolModernWindow(QMainWindow):
             writer.writeheader()
             data_rows = 0
             skipped_empty = 0
+            error_rows = 0
 
             def handle(row_index: int, row: dict):
-                nonlocal data_rows, skipped_empty
+                nonlocal data_rows, skipped_empty, error_rows
                 if _is_empty_row(row):
                     skipped_empty += 1
                     self._log(f"WARNING: skipped empty row {row_index} in {infile.name}")
                     return
-                writer.writerow(row_transform(row, row_index))
-                data_rows += 1
+                try:
+                    writer.writerow(row_transform(row, row_index))
+                    data_rows += 1
+                except ValueError as e:
+                    if skip_errors:
+                        error_rows += 1
+                        self._log(f"SKIPPED row {row_index}: {e}")
+                    else:
+                        raise
 
             handle(first_row_index, first_row)
             for row_index, _fields, row in it:
                 handle(row_index, row)
 
         self._log(f"OK: {infile.name} rows written: {data_rows} (skipped empty: {skipped_empty})")
-        return data_rows
+        return data_rows, error_rows
 
 
 # -----------------------------
