@@ -354,11 +354,11 @@ def _get_xlsx_sheet_names(path: Path) -> list[str]:
     return names
 
 
-def _check_config_compatibility(template: str, mode: str, device_type: str) -> str | None:
-    """Return a warning string if template name suggests a different device type, else None."""
-    if not template:
+def _check_config_compatibility(name: str, mode: str, device_type: str, label: str = "Config") -> str | None:
+    """Return a warning+suggestion string if name suggests a different device type/mode, else None."""
+    if not name:
         return None
-    t = template.upper()
+    t = name.upper()
 
     specific = [
         ("R310", "Repeater"), ("R320", "Repeater"), ("R330", "Repeater"),
@@ -368,17 +368,32 @@ def _check_config_compatibility(template: str, mode: str, device_type: str) -> s
     for dtype, expected_mode in specific:
         if dtype in t:
             if expected_mode != mode:
-                return f"Config name contains '{dtype}' ({expected_mode}) — current mode is {mode}."
+                return (
+                    f"{label} contains '{dtype}' ({expected_mode}) but mode is {mode}. "
+                    f"→ Switch to {expected_mode} mode."
+                )
             if dtype != device_type:
-                return f"Config name contains '{dtype}' — selected device type is {device_type}."
+                return (
+                    f"{label} contains '{dtype}' but device type is set to {device_type}. "
+                    f"→ Change device type to {dtype}."
+                )
             return None
 
     if re.search(r"(?<![A-Z])HE(?![A-Z])|HEADEND", t) and mode != "Headend":
-        return f"Config name suggests Headend (HE/HEADEND) — current mode is {mode}."
+        return (
+            f"{label} suggests Headend (HE/HEADEND) but mode is {mode}. "
+            f"→ Switch to Headend mode."
+        )
     if re.search(r"PROXY|PROX(?![A-Z])", t) and mode != "Proxie":
-        return f"Config name suggests Proxie (PROXY) — current mode is {mode}."
+        return (
+            f"{label} suggests Proxie (PROXY) but mode is {mode}. "
+            f"→ Switch to Proxie mode."
+        )
     if re.search(r"EBRO", t) and mode != "Repeater":
-        return f"Config name suggests Repeater (EBRO) — current mode is {mode}."
+        return (
+            f"{label} suggests Repeater (EBRO) but mode is {mode}. "
+            f"→ Switch to Repeater mode."
+        )
 
     return None
 
@@ -1412,9 +1427,19 @@ class CsvToolModernWindow(QMainWindow):
             return
         template = (self.template_edit.text() or "").strip()
         dtype = self._per_mode_device_type.get(self.mode, "")
-        warning = _check_config_compatibility(template, self.mode, dtype)
-        if warning:
-            self.config_warn_label.setText(f"⚠  {warning}")
+
+        warnings = []
+        w = _check_config_compatibility(template, self.mode, dtype, label="Template")
+        if w:
+            warnings.append(w)
+        f = self._selected_file()
+        if f:
+            w2 = _check_config_compatibility(f.stem, self.mode, dtype, label="File name")
+            if w2:
+                warnings.append(w2)
+
+        if warnings:
+            self.config_warn_label.setText("⚠  " + "  |  ".join(warnings))
             self.config_warn_label.setVisible(True)
         else:
             self.config_warn_label.setText("")
@@ -1581,6 +1606,7 @@ class CsvToolModernWindow(QMainWindow):
             self._set_sheet_selector_visible(False)
 
         self._render_preview(f, info)
+        self._update_config_warning()
 
     def _render_preview(self, f: Path, info: dict):
         headers = info["headers"]
