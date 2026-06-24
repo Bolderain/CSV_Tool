@@ -1,3 +1,35 @@
 # Python bytecode cache
 __pycache__/
 *.pyc
+
+# PyInstaller build output
+build/
+dist/
+exe/
+
+# Customer data — never commit
+*.csv
+*.xlsx
+*.xls
+CVS_Test_Files/
+claude_talk/
+
+# Allow synthetic test data (no real customer data in here)
+!tests/data/
+!tests/data/*
+
+# Internal / personal files
+Training session with Armin.txt
+Readme.txt
+
+# Duplicate / old preset files
+presets.json
+presets/presets .json
+
+# Old tool variants (only csv_tool_modern.py is maintained)
+csv_tool.py
+csv_tool_last_working.py
+csv_tool_with_tooltips.py
+
+# pytest cache
+.pytest_cache/

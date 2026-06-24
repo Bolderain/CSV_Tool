@@ -11,7 +11,7 @@ datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 
 
 a = Analysis(
-    ['csv_tool.py'],
+    ['csv_tool_modern.py'],
     pathex=[],
     binaries=binaries,
     datas=datas,
