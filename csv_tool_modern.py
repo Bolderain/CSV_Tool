@@ -8,7 +8,7 @@
 #   (replaces the old "Edit for" dropdown + three separate run buttons)
 # - Real table preview with highlighted Serial/MAC columns
 # - Live OUTPUT preview tab: shows exactly what the exported rows will look like
-#   (Headend C->B, MAC-1, Proxie accessToken + colon MAC) before you export
+#   (Proxie accessToken + colon MAC) before you export
 # - Inline status badges (green check when Serial/MAC auto-detected)
 # - Editable device type (R310/R320/R330 ... or your own value)
 # - Multi-sheet xlsx selector + "no header row" support
@@ -386,28 +386,6 @@ def _validate_export(
         "total_data": ok_count + len(errors),
     }
 
-
-def _serial_c_to_b(serial: str) -> str:
-    s = (serial or "").strip()
-    if not s:
-        raise ValueError("Headend mode: serialNumber is empty.")
-    if s[0] in ("C", "c"):
-        return "B" + s[1:]
-    if s[0] in ("B", "b"):
-        return "B" + s[1:]
-    raise ValueError(f"Headend mode: serialNumber does not start with C or B: '{s}'")
-
-
-def _mac_minus_one(mac: str) -> str:
-    raw = re.sub(r"[^0-9a-fA-F]", "", (mac or "").strip())
-    if len(raw) != 12:
-        raise ValueError(f"Headend mode: invalid MAC (expected 12 hex digits): '{mac}'")
-    value = int(raw, 16)
-    if value == 0:
-        raise ValueError(f"Headend mode: MAC underflow on decrement: '{mac}'")
-    value -= 1
-    h = f"{value:012X}"
-    return ":".join(h[i : i + 2] for i in range(0, 12, 2))
 
 
 def _normalize_mac_colonsep(mac: str) -> str:
@@ -843,8 +821,8 @@ def _headend_transform_factory(
             raise ValueError(
                 f"Headend mode: empty macAddress at row {row_index} (column: '{mac_key}')"
             )
-        out_serial = _serial_c_to_b(in_serial)
-        out_mac = _mac_minus_one(in_mac)
+        out_serial = in_serial
+        out_mac = _normalize_mac_colonsep(in_mac)
         return {
             "serialNumber": out_serial,
             "macAddress": out_mac,
