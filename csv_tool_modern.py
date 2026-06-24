@@ -1946,6 +1946,7 @@ class CsvToolModernWindow(QMainWindow):
             "desiredConfigurationTemplate": (self.template_edit.text() or "").strip() or "(template)",
             "desiredConfigurationMd5": (md5.lower() if md5 else "(md5)"),
             "desiredConfigurationSize": (self.size_edit.text() or "").strip() or "(size)",
+            "headend_calc_from_proxie": self.headend_calc_cb.isChecked(),
         }
 
         try:
