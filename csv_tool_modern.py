@@ -388,6 +388,27 @@ def _validate_export(
 
 
 
+def _serial_c_to_b(serial: str) -> str:
+    s = (serial or "").strip()
+    if not s:
+        raise ValueError("Headend mode: serialNumber is empty.")
+    if s[0] in ("C", "c", "B", "b"):
+        return "B" + s[1:]
+    raise ValueError(f"Headend mode: serialNumber does not start with C or B: '{s}'")
+
+
+def _mac_minus_one(mac: str) -> str:
+    raw = re.sub(r"[^0-9a-fA-F]", "", (mac or "").strip())
+    if len(raw) != 12:
+        raise ValueError(f"Headend mode: invalid MAC (expected 12 hex digits): '{mac}'")
+    value = int(raw, 16)
+    if value == 0:
+        raise ValueError(f"Headend mode: MAC underflow on decrement: '{mac}'")
+    value -= 1
+    h = f"{value:012X}"
+    return ":".join(h[i : i + 2] for i in range(0, 12, 2))
+
+
 def _normalize_mac_colonsep(mac: str) -> str:
     raw = re.sub(r"[^0-9a-fA-F]", "", (mac or "").strip())
     if len(raw) != 12:
@@ -469,7 +490,8 @@ def _check_config_compatibility(name: str, mode: str, device_type: str, label: s
     return None
 
 
-def _build_run_cfg(mode: str, device_type: str, template: str, md5: str, size: str) -> dict:
+def _build_run_cfg(mode: str, device_type: str, template: str, md5: str, size: str,
+                   headend_calc_from_proxie: bool = False) -> dict:
     if mode not in DEVICE_VARIANTS:
         raise ValueError(f"Unknown mode: {mode}")
 
@@ -501,6 +523,7 @@ def _build_run_cfg(mode: str, device_type: str, template: str, md5: str, size: s
         "desiredConfigurationTemplate": template,
         "desiredConfigurationMd5": md5.lower(),
         "desiredConfigurationSize": size,
+        "headend_calc_from_proxie": headend_calc_from_proxie,
     }
 
 
@@ -810,6 +833,8 @@ def _headend_transform_factory(
             "Use the mapping dropdowns and save the mapping for the customer."
         )
 
+    calc_from_proxie = run_cfg.get("headend_calc_from_proxie", False)
+
     def transform(row: dict, row_index: int) -> dict:
         in_serial = (row.get(serial_key) or "").strip()
         in_mac = (row.get(mac_key) or "").strip()
@@ -821,8 +846,12 @@ def _headend_transform_factory(
             raise ValueError(
                 f"Headend mode: empty macAddress at row {row_index} (column: '{mac_key}')"
             )
-        out_serial = in_serial
-        out_mac = _normalize_mac_colonsep(in_mac)
+        if calc_from_proxie:
+            out_serial = _serial_c_to_b(in_serial)
+            out_mac = _mac_minus_one(in_mac)
+        else:
+            out_serial = in_serial
+            out_mac = _normalize_mac_colonsep(in_mac)
         return {
             "serialNumber": out_serial,
             "macAddress": out_mac,
@@ -1283,6 +1312,17 @@ class CsvToolModernWindow(QMainWindow):
         )
         self.no_header_cb.toggled.connect(self._on_no_header_changed)
         opt_row.addWidget(self.no_header_cb)
+        opt_row.addSpacing(16)
+        self.headend_calc_cb = QCheckBox("Calculate from Proxie data (C→B, MAC−1)")
+        self.headend_calc_cb.setToolTip(
+            "When checked: serial first letter C→B and MAC decremented by 1.\n"
+            "Use this if your input file contains Proxie data and you need to\n"
+            "derive the Headend serial/MAC from it.\n\n"
+            "When unchecked (default): serial and MAC are taken as-is —\n"
+            "use this if your Headend sheet already contains the correct values."
+        )
+        self.headend_calc_cb.setVisible(False)
+        opt_row.addWidget(self.headend_calc_cb)
         opt_row.addStretch(1)
         self.sheet_label.setVisible(False)
         self.sheet_combo.setVisible(False)
@@ -1541,10 +1581,12 @@ class CsvToolModernWindow(QMainWindow):
 
         descs = {
             "Repeater": "Serial & MAC copied as-is. type = selected variant (R310 …).",
-            "Headend": "Serial first char C→B, MAC − 1. type = selected variant (M300 …).",
-            "Proxie": "MAC → colon format + accessToken = 00185803 + MAC. type = selected variant (P300 …).",
+            "Headend":  "Direct input: serial & MAC taken as-is (default). "
+                        "Enable 'Calculate from Proxie' for C→B / MAC−1. type = selected variant (M300 …).",
+            "Proxie":   "MAC → colon format + accessToken = 00185803 + MAC. type = selected variant (P300 …).",
         }
         self.mode_desc.setText(descs.get(mode, ""))
+        self.headend_calc_cb.setVisible(mode == "Headend")
 
         self._sync_mode_ui(mode)
         self._refresh_export_button()
@@ -2116,6 +2158,7 @@ class CsvToolModernWindow(QMainWindow):
                 template=self.template_edit.text(),
                 md5=self.md5_edit.text(),
                 size=self.size_edit.text(),
+                headend_calc_from_proxie=self.headend_calc_cb.isChecked(),
             )
 
             warning = _check_config_compatibility(run_cfg["desiredConfigurationTemplate"], mode, device_type)

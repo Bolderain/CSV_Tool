@@ -34,7 +34,10 @@ CFG_HE = {
     "desiredConfigurationTemplate": "CFG-HE.tar.gz",
     "desiredConfigurationMd5": "b" * 32,
     "desiredConfigurationSize": "215",
+    "headend_calc_from_proxie": False,   # default: direct input
 }
+
+CFG_HE_CALC = {**CFG_HE, "headend_calc_from_proxie": True}  # old C->B / MAC-1 mode
 
 CFG_PROXIE = {
     "type": "P300",
@@ -129,6 +132,43 @@ class TestHeadendTransform:
         f = self._factory(["SN", "MAC"])
         with pytest.raises(ValueError, match="empty macAddress"):
             f({"SN": "C10625001001M", "MAC": ""}, 1)
+
+    def test_non_c_serial_accepted(self):
+        """Direct mode accepts any serial prefix (e.g. ECRX from Jakub's scanner)."""
+        f = self._factory(["SN", "MAC"])
+        result = f({"SN": "ECRX3623000001", "MAC": "000BC2170001"}, 1)
+        assert result["serialNumber"] == "ECRX3623000001"
+
+
+# ---------------------------------------------------------------------------
+# Headend — calculate from Proxie mode (C->B, MAC-1)
+# ---------------------------------------------------------------------------
+
+class TestHeadendCalcFromProxie:
+    """Old behavior enabled via headend_calc_from_proxie=True."""
+
+    def _factory(self, fields):
+        return ct._headend_transform_factory(fields, CFG_HE_CALC, None)
+
+    def test_serial_c_to_b(self):
+        f = self._factory(["SN", "MAC"])
+        result = f({"SN": "C10625001001M", "MAC": "000BC2100002"}, 1)
+        assert result["serialNumber"] == "B10625001001M"
+
+    def test_mac_minus_one(self):
+        f = self._factory(["SN", "MAC"])
+        result = f({"SN": "C10625001001M", "MAC": "000BC2100002"}, 1)
+        assert result["macAddress"] == "00:0B:C2:10:00:01"
+
+    def test_serial_already_b_kept(self):
+        f = self._factory(["SN", "MAC"])
+        result = f({"SN": "B10625001001M", "MAC": "000BC2100002"}, 1)
+        assert result["serialNumber"] == "B10625001001M"
+
+    def test_serial_not_c_or_b_raises(self):
+        f = self._factory(["SN", "MAC"])
+        with pytest.raises(ValueError, match="does not start with C or B"):
+            f({"SN": "ECRX3623000001", "MAC": "000BC2170001"}, 1)
 
 
 # ---------------------------------------------------------------------------
