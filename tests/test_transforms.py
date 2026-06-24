@@ -175,17 +175,19 @@ class TestProxieTransform:
 # ---------------------------------------------------------------------------
 
 class TestValidateExport:
-    def _run(self, filename, mode, cfg):
+    def _run(self, filename, mode, cfg, sheet_name=None, no_header=False):
         result = ct._validate_export(
             infile=DATA / filename,
             mode=mode,
             run_cfg=cfg,
             mapping_override=None,
-            sheet_name=None,
-            no_header=False,
+            sheet_name=sheet_name,
+            no_header=no_header,
             log_fn=lambda msg: None,
         )
         return result
+
+    # --- CSV ---
 
     def test_repeater_comma_csv(self):
         r = self._run("repeater_comma.csv", "Repeater", CFG_REP)
@@ -212,3 +214,50 @@ class TestValidateExport:
         assert len(r["errors"]) == 1
         assert "Duplicate" in r["errors"][0][1]
         assert "C10625002001" in r["errors"][0][1]
+
+    # --- Excel: single sheet ---
+
+    def test_repeater_single_sheet_xlsx(self):
+        r = self._run("repeater_single_sheet.xlsx", "Repeater", CFG_REP, sheet_name="Repeaters")
+        assert r["ok_count"] == 3
+        assert r["errors"] == []
+
+    def test_repeater_empty_rows_skipped(self):
+        r = self._run("repeater_empty_rows.xlsx", "Repeater", CFG_REP, sheet_name="Repeaters")
+        assert r["ok_count"] == 3          # 3 data rows
+        assert r["skipped_empty"] == 2     # 2 empty rows skipped
+        assert r["errors"] == []
+
+    def test_repeater_no_header_xlsx(self):
+        # Columns are auto-named Col_A, Col_B when no header row exists
+        r = ct._validate_export(
+            infile=DATA / "repeater_no_header.xlsx",
+            mode="Repeater",
+            run_cfg=CFG_REP,
+            mapping_override={"serial": "Col_A", "mac": "Col_B"},
+            sheet_name="Sheet1",
+            no_header=True,
+            log_fn=lambda msg: None,
+        )
+        assert r["ok_count"] == 2
+        assert r["errors"] == []
+
+    # --- Excel: Jakub's multi-sheet format ---
+
+    def test_jakub_headend_sheet(self):
+        """Headend sheet: SN + MAC, taken as-is — no transformation."""
+        r = self._run("jakub_multisheet.xlsx", "Headend", CFG_HE, sheet_name="Headend")
+        assert r["ok_count"] == 2
+        assert r["errors"] == []
+
+    def test_jakub_proxie_sheet(self):
+        """Proxie sheet: SN + bpl mac (+ eth mac ignored) — accessToken generated."""
+        r = self._run("jakub_multisheet.xlsx", "Proxie", CFG_PROXIE, sheet_name="Proxies")
+        assert r["ok_count"] == 3
+        assert r["errors"] == []
+
+    def test_jakub_wrong_sheet_falls_back_to_first(self):
+        """If the requested sheet doesn't exist the tool falls back to the first sheet."""
+        r = self._run("jakub_multisheet.xlsx", "Headend", CFG_HE, sheet_name="DoesNotExist")
+        # Falls back to first sheet ("Headend") which has 2 rows
+        assert r["ok_count"] == 2
