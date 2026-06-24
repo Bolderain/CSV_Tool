@@ -1313,7 +1313,7 @@ class CsvToolModernWindow(QMainWindow):
         self.no_header_cb.toggled.connect(self._on_no_header_changed)
         opt_row.addWidget(self.no_header_cb)
         opt_row.addSpacing(16)
-        self.headend_calc_cb = QCheckBox("Calculate from Proxie data (C→B, MAC−1)")
+        self.headend_calc_cb = QCheckBox("⚠  Calculate from Proxie data (C→B, MAC−1)")
         self.headend_calc_cb.setToolTip(
             "When checked: serial first letter C→B and MAC decremented by 1.\n"
             "Use this if your input file contains Proxie data and you need to\n"
@@ -1321,6 +1321,13 @@ class CsvToolModernWindow(QMainWindow):
             "When unchecked (default): serial and MAC are taken as-is —\n"
             "use this if your Headend sheet already contains the correct values."
         )
+        self.headend_calc_cb.setStyleSheet(
+            f"QCheckBox {{ color: {WARN_ORANGE}; font-weight: bold; "
+            f"background: #fff3e0; border: 2px solid {WARN_ORANGE}; "
+            f"border-radius: 4px; padding: 3px 8px; }}"
+            f"QCheckBox::indicator {{ margin-right: 4px; }}"
+        )
+        self.headend_calc_cb.toggled.connect(self._refresh_output_preview)
         self.headend_calc_cb.setVisible(False)
         opt_row.addWidget(self.headend_calc_cb)
         opt_row.addStretch(1)
