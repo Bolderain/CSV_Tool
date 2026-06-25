@@ -9,13 +9,30 @@ Supports **Repeater**, **Headend**, and **Proxie** device types.
 ## Features
 
 - Drag & drop CSV or Excel files onto the file list
-- Auto-detects Serial and MAC columns
+- Four device modes: **Repeater**, **Headend**, **Proxie**, **1T**
+- Auto-detects Serial and MAC columns; MAC address always normalized to colon-separated format (`AA:BB:CC:DD:EE:FF`)
 - Multi-sheet Excel support with optional "no header row" mode
 - Live output preview before export
 - Saves firmware presets per customer (template, MD5, size)
 - Saves column mappings per customer
 - Duplicate serial number detection
 - Validation summary with row counts and warnings
+- **Headend: Calculate from Proxie** — toggle to derive headend values from a Proxie file; shown with an orange warning and reflected in the live preview immediately
+
+---
+
+## Getting Started
+
+1. **Add files** — click *Add files* and pick one or more `.csv` or `.xlsx` device exports
+2. **Check column mapping** — verify Serial and MAC columns in the *Input preview*; adjust via the dropdowns if needed
+3. **Save mapping** *(recommended)* — enter a customer name (e.g. `Bayernwerk`) and click *Save mapping for customer*
+4. **Pick a preset** — select a firmware preset for the target device type or fill in the fields directly
+5. **Run** — click **Repeater**, **Headend**, **Proxie**, or **1T**
+
+Output filename format:
+```
+Device_import_YYYYMMDD_CUSTOMERNAME_ROWCOUNT_TYPE.csv
+```
 
 ---
 
