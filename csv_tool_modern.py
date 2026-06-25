@@ -933,18 +933,18 @@ def _g1t_transform_factory(
 
     def transform(row: dict, row_index: int) -> dict:
         serial = (row.get(serial_key) or "").strip()
-        mac = (row.get(mac_key) or "").strip()
+        mac_in = (row.get(mac_key) or "").strip()
         if not serial:
             raise ValueError(
                 f"G1T mode: empty serialNumber at row {row_index} (column: '{serial_key}')"
             )
-        if not mac:
+        if not mac_in:
             raise ValueError(
                 f"G1T mode: empty macAddress at row {row_index} (column: '{mac_key}')"
             )
         return {
             "serialNumber": serial,
-            "macAddress": mac,
+            "macAddress": _normalize_mac_colonsep(mac_in),
             "type": run_cfg["type"],
             "registrationStatus": run_cfg["registrationStatus"],
             "desiredConfigurationTemplate": run_cfg["desiredConfigurationTemplate"],
