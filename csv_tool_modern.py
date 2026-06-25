@@ -160,7 +160,7 @@ PROXIE_OUTPUT_FIELDS = [
     "desiredConfigurationSize",
 ]
 
-G1T_OUTPUT_FIELDS = [
+ONET_OUTPUT_FIELDS = [
     "serialNumber",
     "macAddress",
     "type",
@@ -175,13 +175,13 @@ DEVICE_VARIANTS = {
     "Repeater": ["R310", "R320", "R330"],
     "Headend":  ["M200", "M300", "M310", "M320", "M400", "M500"],
     "Proxie":   ["P200", "P300", "P310", "P400", "P500"],
-    "G1T":      ["C300", "C500"],
+    "1T":      ["C300", "C500"],
 }
 
 # Maps the leading letter of a device-type token (e.g. M400) to its mode
-_DEVICE_LETTER_MODE = {"R": "Repeater", "M": "Headend", "P": "Proxie", "C": "G1T"}
+_DEVICE_LETTER_MODE = {"R": "Repeater", "M": "Headend", "P": "Proxie", "C": "1T"}
 
-MODES = ["Repeater", "Headend", "Proxie", "G1T"]
+MODES = ["Repeater", "Headend", "Proxie", "1T"]
 
 ACCESS_TOKEN_PREFIX = "00185803"
 
@@ -731,7 +731,7 @@ def _default_presets_payload() -> dict:
                 "desiredConfigurationSize": "630",
             }
         },
-        "G1T": {
+        "1T": {
             "DEFAULT": {
                 "desiredConfigurationTemplate": "",
                 "desiredConfigurationMd5": "",
@@ -752,7 +752,7 @@ def _load_presets() -> dict:
     with path.open("r", encoding="utf-8") as f:
         data = json.load(f)
 
-    out = {"Repeater": {}, "Headend": {}, "Proxie": {}, "G1T": {}}
+    out = {"Repeater": {}, "Headend": {}, "Proxie": {}, "1T": {}}
     for mode in out.keys():
         v = data.get(mode, {})
         if isinstance(v, dict):
@@ -766,7 +766,7 @@ def _save_presets(presets: dict) -> None:
         "Repeater": presets.get("Repeater", {}),
         "Headend": presets.get("Headend", {}),
         "Proxie": presets.get("Proxie", {}),
-        "G1T": presets.get("G1T", {}),
+        "1T": presets.get("1T", {}),
     }
     with path.open("w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2, ensure_ascii=False)
@@ -820,18 +820,18 @@ def _repeater_transform_factory(
 
     def transform(row: dict, row_index: int) -> dict:
         serial = (row.get(serial_key) or "").strip()
-        mac = (row.get(mac_key) or "").strip()
+        mac_in = (row.get(mac_key) or "").strip()
         if not serial:
             raise ValueError(
                 f"Repeater mode: empty serialNumber at row {row_index} (column: '{serial_key}')"
             )
-        if not mac:
+        if not mac_in:
             raise ValueError(
                 f"Repeater mode: empty macAddress at row {row_index} (column: '{mac_key}')"
             )
         return {
             "serialNumber": serial,
-            "macAddress": mac,
+            "macAddress": _normalize_mac_colonsep(mac_in),
             "type": run_cfg["type"],
             "registrationStatus": run_cfg["registrationStatus"],
             "desiredConfigurationTemplate": run_cfg["desiredConfigurationTemplate"],
@@ -921,13 +921,13 @@ def _proxie_transform_factory(
     return transform
 
 
-def _g1t_transform_factory(
+def _onet_transform_factory(
     input_fieldnames: list[str], run_cfg: dict, mapping_override: dict | None
 ):
     serial_key, mac_key, _src = _resolve_serial_mac_keys(input_fieldnames, mapping_override)
     if not serial_key or not mac_key:
         raise ValueError(
-            "G1T mode: could not find required columns (serial and mac). "
+            "1T mode: could not find required columns (serial and mac). "
             "Use the mapping dropdowns and save the mapping for the customer."
         )
 
@@ -936,11 +936,11 @@ def _g1t_transform_factory(
         mac_in = (row.get(mac_key) or "").strip()
         if not serial:
             raise ValueError(
-                f"G1T mode: empty serialNumber at row {row_index} (column: '{serial_key}')"
+                f"1T mode: empty serialNumber at row {row_index} (column: '{serial_key}')"
             )
         if not mac_in:
             raise ValueError(
-                f"G1T mode: empty macAddress at row {row_index} (column: '{mac_key}')"
+                f"1T mode: empty macAddress at row {row_index} (column: '{mac_key}')"
             )
         return {
             "serialNumber": serial,
@@ -959,7 +959,7 @@ _FACTORY_BY_MODE = {
     "Repeater": (_repeater_transform_factory, REPEATER_OUTPUT_FIELDS),
     "Headend": (_headend_transform_factory, HEADEND_OUTPUT_FIELDS),
     "Proxie": (_proxie_transform_factory, PROXIE_OUTPUT_FIELDS),
-    "G1T": (_g1t_transform_factory, G1T_OUTPUT_FIELDS),
+    "1T": (_onet_transform_factory, ONET_OUTPUT_FIELDS),
 }
 
 
@@ -1256,7 +1256,7 @@ class CsvToolModernWindow(QMainWindow):
             "Repeater": "Repeater",
             "Headend": "Headend",
             "Proxie": "Proxie",
-            "G1T": "G1T",
+            "1T": "1T",
         }
         for m in MODES:
             b = QPushButton(mode_caption[m])
@@ -1646,7 +1646,7 @@ class CsvToolModernWindow(QMainWindow):
             "Headend":  "Direct input: serial & MAC taken as-is (default). "
                         "Enable 'Calculate from Proxie' for C→B / MAC−1. type = selected variant (M300 …).",
             "Proxie":   "MAC → colon format + accessToken = 00185803 + MAC. type = selected variant (P300 …).",
-            "G1T":      "Serial & MAC copied as-is. type = selected variant (C300, C500 …).",
+            "1T":      "Serial & MAC copied as-is. type = selected variant (C300, C500 …).",
         }
         self.mode_desc.setText(descs.get(mode, ""))
         self.headend_calc_cb.setVisible(mode == "Headend")
